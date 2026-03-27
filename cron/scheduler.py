@@ -25,7 +25,7 @@ except ImportError:
     except ImportError:
         msvcrt = None
 from pathlib import Path
-from hermes_constants import get_hermes_home
+from hermes_constants import get_nchat_home
 from typing import Optional
 
 from hermes_time import now as _hermes_now
@@ -43,7 +43,7 @@ from cron.jobs import get_due_jobs, mark_job_run, save_job_output
 SILENT_MARKER = "[SILENT]"
 
 # Resolve Hermes home directory (respects HERMES_HOME override)
-_hermes_home = get_hermes_home()
+_hermes_home = get_nchat_home()
 
 # File-based lock prevents concurrent ticks from gateway + daemon + systemd timer
 _LOCK_DIR = _hermes_home / "cron"

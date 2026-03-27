@@ -5,7 +5,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from hermes_cli.config import get_hermes_home
+from hermes_cli.config import get_nchat_home
 
 
 def get_sandbox_dir() -> Path:
@@ -18,7 +18,7 @@ def get_sandbox_dir() -> Path:
     if custom:
         p = Path(custom)
     else:
-        p = get_hermes_home() / "sandboxes"
+        p = get_nchat_home() / "sandboxes"
     p.mkdir(parents=True, exist_ok=True)
     return p
 

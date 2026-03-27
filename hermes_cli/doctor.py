@@ -9,10 +9,10 @@ import sys
 import subprocess
 import shutil
 
-from hermes_cli.config import get_project_root, get_hermes_home, get_env_path
+from hermes_cli.config import get_project_root, get_nchat_home, get_env_path
 
 PROJECT_ROOT = get_project_root()
-HERMES_HOME = get_hermes_home()
+HERMES_HOME = get_nchat_home()
 
 # Load environment variables from ~/.hermes/.env so API key checks work
 from dotenv import load_dotenv

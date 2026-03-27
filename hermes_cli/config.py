@@ -59,7 +59,7 @@ def is_managed() -> bool:
     """
     if os.getenv("HERMES_MANAGED", "").lower() in ("true", "1", "yes"):
         return True
-    managed_marker = get_hermes_home() / ".managed"
+    managed_marker = get_nchat_home() / ".managed"
     return managed_marker.exists()
 
 def managed_error(action: str = "modify configuration"):
@@ -77,15 +77,15 @@ def managed_error(action: str = "modify configuration"):
 # =============================================================================
 
 # Re-export from hermes_constants — canonical definition lives there.
-from hermes_constants import get_hermes_home  # noqa: F811,E402
+from hermes_constants import get_nchat_home  # noqa: F811,E402
 
 def get_config_path() -> Path:
     """Get the main config file path."""
-    return get_hermes_home() / "config.yaml"
+    return get_nchat_home() / "config.yaml"
 
 def get_env_path() -> Path:
     """Get the .env file path (for API keys)."""
-    return get_hermes_home() / ".env"
+    return get_nchat_home() / ".env"
 
 def get_project_root() -> Path:
     """Get the project installation directory."""
@@ -119,7 +119,7 @@ def _ensure_default_soul_md(home: Path) -> None:
 
 def ensure_hermes_home():
     """Ensure ~/.hermes directory structure exists with secure permissions."""
-    home = get_hermes_home()
+    home = get_nchat_home()
     home.mkdir(parents=True, exist_ok=True)
     _secure_dir(home)
     for subdir in ("cron", "sessions", "logs", "memories"):

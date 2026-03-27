@@ -32,6 +32,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
+from hermes_constants import get_nchat_home
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ logger = logging.getLogger(__name__)
 MAX_MESSAGE_LENGTH = 4000
 
 # Store directory for E2EE keys and sync state.
-_STORE_DIR = Path.home() / ".hermes" / "matrix" / "store"
+_STORE_DIR = get_nchat_home() / "matrix" / "store"
 
 # Grace period: ignore messages older than this many seconds before startup.
 _STARTUP_GRACE_SECONDS = 5

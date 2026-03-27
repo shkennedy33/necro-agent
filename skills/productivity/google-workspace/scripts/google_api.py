@@ -28,7 +28,13 @@ from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 
-HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
+# Ensure project root is on sys.path so hermes_constants is importable
+_project_root = str(Path(__file__).resolve().parents[4])
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+from hermes_constants import get_nchat_home
+
+HERMES_HOME = get_nchat_home()
 TOKEN_PATH = HERMES_HOME / "google_token.json"
 
 SCOPES = [

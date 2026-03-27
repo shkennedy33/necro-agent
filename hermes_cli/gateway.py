@@ -14,7 +14,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
-from hermes_cli.config import get_env_value, get_hermes_home, save_env_value, is_managed, managed_error
+from hermes_cli.config import get_env_value, get_nchat_home, save_env_value, is_managed, managed_error
 from hermes_cli.setup import (
     print_header, print_info, print_success, print_warning, print_error,
     prompt, prompt_choice, prompt_yes_no,
@@ -134,7 +134,7 @@ def get_service_name() -> str:
     """
     import hashlib
     from pathlib import Path as _Path  # local import to avoid monkeypatch interference
-    home = get_hermes_home().resolve()
+    home = get_nchat_home().resolve()
     default = (_Path.home() / ".hermes").resolve()
     if home == default:
         return _SERVICE_BASE
@@ -437,7 +437,7 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
     path_entries.extend(["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"])
     sane_path = ":".join(path_entries)
 
-    hermes_home = str(get_hermes_home().resolve())
+    hermes_home = str(get_nchat_home().resolve())
 
     if system:
         username, group_name, home_dir = _system_service_identity(run_as_user)
@@ -755,7 +755,7 @@ def systemd_status(deep: bool = False, system: bool = False):
 def generate_launchd_plist() -> str:
     python_path = get_python_path()
     working_dir = str(PROJECT_ROOT)
-    log_dir = get_hermes_home() / "logs"
+    log_dir = get_nchat_home() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     
     return f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -953,7 +953,7 @@ def launchd_status(deep: bool = False):
         print("  Run: hermes gateway start")
     
     if deep:
-        log_file = get_hermes_home() / "logs" / "gateway.log"
+        log_file = get_nchat_home() / "logs" / "gateway.log"
         if log_file.exists():
             print()
             print("Recent logs:")
@@ -1233,7 +1233,7 @@ def _platform_status(platform: dict) -> str:
     val = get_env_value(token_var)
     if token_var == "WHATSAPP_ENABLED":
         if val and val.lower() == "true":
-            session_file = get_hermes_home() / "whatsapp" / "session" / "creds.json"
+            session_file = get_nchat_home() / "whatsapp" / "session" / "creds.json"
             if session_file.exists():
                 return "configured + paired"
             return "enabled, not paired"

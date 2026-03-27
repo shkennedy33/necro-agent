@@ -13,6 +13,7 @@ Two sources feed the allowlist:
 2. **User config** — ``terminal.env_passthrough`` in config.yaml lets users
    explicitly allowlist vars for non-skill use cases.
 
+
 Both ``code_execution_tool.py`` and ``tools/environments/local.py`` consult
 :func:`is_env_passthrough` before stripping a variable.
 """
@@ -23,6 +24,8 @@ import logging
 import os
 from pathlib import Path
 from typing import Iterable
+
+from hermes_constants import get_nchat_home
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +56,7 @@ def _load_config_passthrough() -> frozenset[str]:
 
     result: set[str] = set()
     try:
-        hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        hermes_home = get_nchat_home()
         config_path = hermes_home / "config.yaml"
         if config_path.exists():
             import yaml

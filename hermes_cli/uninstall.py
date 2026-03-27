@@ -11,7 +11,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_nchat_home
 
 from hermes_cli.colors import Colors, color
 
@@ -180,7 +180,7 @@ def run_uninstall(args):
     - Keep data: removes code but keeps ~/.hermes/ for future reinstall
     """
     project_root = get_project_root()
-    hermes_home = get_hermes_home()
+    hermes_home = get_nchat_home()
     
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.MAGENTA, Colors.BOLD))

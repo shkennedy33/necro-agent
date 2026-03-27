@@ -51,8 +51,8 @@ def build_call(soul_path: Path | None = None) -> str:
     """
     if soul_path is None:
         # Default location
-        from hermes_constants import get_hermes_home
-        soul_path = get_hermes_home() / "SOUL.md"
+        from hermes_constants import get_nchat_home
+        soul_path = get_nchat_home() / "SOUL.md"
 
     if soul_path and soul_path.exists():
         try:

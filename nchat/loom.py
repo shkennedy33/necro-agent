@@ -160,8 +160,8 @@ class Loom:
 
 def get_loom_path(session_id: str) -> Path:
     """Get the loom file path for a session."""
-    from hermes_constants import get_hermes_home
-    return get_hermes_home() / "loom" / f"{session_id}.jsonl"
+    from hermes_constants import get_nchat_home
+    return get_nchat_home() / "loom" / f"{session_id}.jsonl"
 
 
 def get_or_create_loom(session_id: str) -> Loom:

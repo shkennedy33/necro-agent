@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 import yaml
 
-from hermes_cli.config import get_hermes_home, get_config_path
+from hermes_cli.config import get_nchat_home, get_config_path
 from hermes_constants import OPENROUTER_BASE_URL
 
 logger = logging.getLogger(__name__)
@@ -460,7 +460,7 @@ def _oauth_trace(event: str, *, sequence_id: Optional[str] = None, **fields: Any
 # =============================================================================
 
 def _auth_file_path() -> Path:
-    return get_hermes_home() / "auth.json"
+    return get_nchat_home() / "auth.json"
 
 
 def _auth_lock_path() -> Path:

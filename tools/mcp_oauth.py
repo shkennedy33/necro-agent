@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from hermes_constants import get_nchat_home
+
 logger = logging.getLogger(__name__)
 
 _TOKEN_DIR_NAME = "mcp-tokens"
@@ -50,7 +52,7 @@ class HermesTokenStorage:
         self._server_name = _sanitize_server_name(server_name)
 
     def _base_dir(self) -> Path:
-        home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        home = get_nchat_home()
         d = home / _TOKEN_DIR_NAME
         d.mkdir(parents=True, exist_ok=True)
         return d

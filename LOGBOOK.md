@@ -117,3 +117,39 @@ Migrated the agent loop for compact mode. When `_compact_mode` is active (Opus/S
 - Post-cast review: background review spawn after 5+ turns
 - Interrupt: graceful exit mid-task
 - Non-compact fallback: verbose mode unchanged
+
+---
+
+## 2026-03-26 — Centralize HERMES_HOME path construction
+
+### Summary
+Replaced all hardcoded `.hermes` path construction with `get_hermes_home()` from `hermes_constants.py`. This ensures every file uses the single source of truth that respects `NCHAT_HOME` / `HERMES_HOME` env vars and defaults to `~/.nchat`.
+
+### Files modified (19 files)
+- `agent/context_references.py` — replaced `Path(os.getenv("HERMES_HOME", str(home / ".hermes")))` → `get_hermes_home()`
+- `agent/models_dev.py` — replaced `Path(env_val) if env_val else Path.home() / ".hermes"` → `get_hermes_home()`
+- `agent/model_metadata.py` — replaced `Path(os.environ.get("HERMES_HOME", ...))` → `get_hermes_home()`
+- `tools/browser_tool.py` — replaced 7 occurrences of `Path(os.environ.get("HERMES_HOME", ...))` → `get_hermes_home()`
+- `tools/env_passthrough.py` — replaced `Path(os.environ.get("HERMES_HOME", ...))` → `get_hermes_home()`
+- `tools/file_tools.py` — replaced `_pathlib.Path("~/.hermes").expanduser()` → `get_hermes_home()`
+- `tools/file_operations.py` — replaced `os.path.join(_HOME, ".hermes", ".env")` → `os.path.join(str(get_hermes_home()), ".env")`
+- `tools/mcp_tool.py` — replaced `os.path.expanduser(os.getenv("HERMES_HOME", ...))` → `str(get_hermes_home())`
+- `tools/mcp_oauth.py` — replaced `Path(os.environ.get("HERMES_HOME", ...))` → `get_hermes_home()`
+- `gateway/platforms/matrix.py` — replaced `Path.home() / ".hermes" / "matrix" / "store"` → `get_hermes_home() / "matrix" / "store"`
+- `hermes_cli/plugins.py` — replaced `os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))` → `str(get_hermes_home())`
+- `hermes_cli/plugins_cmd.py` — replaced `os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))` → `get_hermes_home()`
+- `hermes_cli/env_loader.py` — replaced `os.getenv("HERMES_HOME", Path.home() / ".hermes")` → `get_hermes_home()`
+- `hermes_cli/setup.py` — replaced `Path(os.environ.get("HERMES_HOME", ...))` → `get_hermes_home()`
+- `hermes_cli/main.py` — replaced `Path(os.getenv("HERMES_HOME", ...))` → `get_hermes_home()`
+- `scripts/discord-voice-doctor.py` — replaced `Path(os.getenv("HERMES_HOME", ...))` → `get_hermes_home()`
+- `skills/productivity/google-workspace/scripts/setup.py` — replaced + added sys.path insert for hermes_constants
+- `skills/productivity/google-workspace/scripts/google_api.py` — replaced + added sys.path insert for hermes_constants
+- `rl_cli.py` — moved import to fix pre-existing NameError (used before import), removed duplicate import
+
+### Not modified (intentionally)
+- `hermes_constants.py` — the source of truth itself
+- `hermes_cli/gateway.py:138` — intentional comparison against legacy `~/.hermes` default for service naming
+- `hermes_cli/plugins.py:198` — project-local `.hermes/plugins/` directory (not HERMES_HOME)
+- `agent/skill_commands.py:39` — project-local `.hermes/plans/` directory (not HERMES_HOME)
+- All files in `build/`, `tests/`, `optional-skills/`
+- Comments and docstrings

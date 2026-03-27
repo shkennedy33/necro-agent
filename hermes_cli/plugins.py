@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from hermes_constants import get_nchat_home
+
 try:
     import yaml
 except ImportError:  # pragma: no cover – yaml is optional at import time
@@ -187,7 +189,7 @@ class PluginManager:
         manifests: List[PluginManifest] = []
 
         # 1. User plugins (~/.hermes/plugins/)
-        hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+        hermes_home = str(get_nchat_home())
         user_dir = Path(hermes_home) / "plugins"
         manifests.extend(self._scan_directory(user_dir, source="user"))
 

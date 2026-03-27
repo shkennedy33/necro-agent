@@ -9,7 +9,7 @@ import os
 import re
 from pathlib import Path
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_nchat_home
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -322,7 +322,7 @@ def build_skills_system_prompt(
     match skills by meaning, not just name.
     Filters out skills incompatible with the current OS platform.
     """
-    hermes_home = get_hermes_home()
+    hermes_home = get_nchat_home()
     skills_dir = hermes_home / "skills"
 
     if not skills_dir.exists():
@@ -451,7 +451,7 @@ def load_soul_md() -> Optional[str]:
     except Exception as e:
         logger.debug("Could not ensure HERMES_HOME before loading SOUL.md: %s", e)
 
-    soul_path = get_hermes_home() / "SOUL.md"
+    soul_path = get_nchat_home() / "SOUL.md"
     if not soul_path.exists():
         return None
     try:

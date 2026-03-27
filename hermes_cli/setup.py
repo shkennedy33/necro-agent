@@ -275,7 +275,7 @@ def _sync_model_from_disk(config: Dict[str, Any]) -> None:
 
 # Import config helpers
 from hermes_cli.config import (
-    get_hermes_home,
+    get_nchat_home,
     get_config_path,
     get_env_path,
     load_config,
@@ -944,7 +944,7 @@ def setup_model_provider(config: dict):
         import yaml
 
         config_path = (
-            Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "config.yaml"
+            get_nchat_home() / "config.yaml"
         )
         try:
             disk_cfg = {}
@@ -3108,7 +3108,7 @@ def run_setup_wizard(args):
     ensure_hermes_home()
 
     config = load_config()
-    hermes_home = get_hermes_home()
+    hermes_home = get_nchat_home()
 
     # Detect non-interactive environments (headless SSH, Docker, CI/CD)
     non_interactive = getattr(args, 'non_interactive', False)

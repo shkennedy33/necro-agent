@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_nchat_home
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -38,7 +38,7 @@ def resolve_config_path() -> Path:
     to ~/.honcho/config.json (global).  Returns the global path if neither
     exists (for first-time setup writes).
     """
-    local_path = get_hermes_home() / "honcho.json"
+    local_path = get_nchat_home() / "honcho.json"
     if local_path.exists():
         return local_path
     return GLOBAL_CONFIG_PATH

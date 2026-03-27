@@ -45,13 +45,13 @@ import fire
 from datetime import datetime
 from pathlib import Path
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_nchat_home
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.env_loader import load_hermes_dotenv
 
-_hermes_home = get_hermes_home()
+_hermes_home = get_nchat_home()
 _project_env = Path(__file__).parent / '.env'
 _loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
 if _loaded_env_paths:
@@ -863,7 +863,7 @@ class AIAgent:
             self.session_id = f"{timestamp_str}_{short_uuid}"
         
         # Session logs go into ~/.hermes/sessions/ alongside gateway sessions
-        hermes_home = get_hermes_home()
+        hermes_home = get_nchat_home()
         self.logs_dir = hermes_home / "sessions"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
@@ -2195,9 +2195,9 @@ class AIAgent:
         honcho_sess = self._honcho.get_or_create(self._honcho_session_key)
         if not honcho_sess.messages:
             try:
-                from hermes_cli.config import get_hermes_home
+                from hermes_cli.config import get_nchat_home
 
-                mem_dir = str(get_hermes_home() / "memories")
+                mem_dir = str(get_nchat_home() / "memories")
                 self._honcho.migrate_memory_files(
                     self._honcho_session_key,
                     mem_dir,

@@ -11,7 +11,7 @@ import logging
 import sys
 from pathlib import Path
 
-from hermes_cli.config import get_hermes_home, get_config_path, load_config, save_config
+from hermes_cli.config import get_nchat_home, get_config_path, load_config, save_config
 from hermes_cli.setup import (
     Colors,
     color,
@@ -37,7 +37,7 @@ _OPENCLAW_SCRIPT = (
 
 # Fallback: user may have installed the skill from the Hub
 _OPENCLAW_SCRIPT_INSTALLED = (
-    get_hermes_home()
+    get_nchat_home()
     / "skills"
     / "migration"
     / "openclaw-migration"
@@ -140,7 +140,7 @@ def _cmd_migrate(args):
         return
 
     # Show what we're doing
-    hermes_home = get_hermes_home()
+    hermes_home = get_nchat_home()
     print()
     print_header("Migration Settings")
     print_info(f"Source:      {source_dir}")

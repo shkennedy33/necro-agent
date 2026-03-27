@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_nchat_home
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ HERMES_ROOT = Path(__file__).parent.parent
 TINKER_ATROPOS_ROOT = HERMES_ROOT / "tinker-atropos"
 ENVIRONMENTS_DIR = TINKER_ATROPOS_ROOT / "tinker_atropos" / "environments"
 CONFIGS_DIR = TINKER_ATROPOS_ROOT / "configs"
-LOGS_DIR = get_hermes_home() / "logs" / "rl_training"
+LOGS_DIR = get_nchat_home() / "logs" / "rl_training"
 
 def _ensure_logs_dir():
     """Lazily create logs directory on first use (avoid side effects at import time)."""

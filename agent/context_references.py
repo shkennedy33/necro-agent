@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from agent.model_metadata import estimate_tokens_rough
+from hermes_constants import get_nchat_home
 
 REFERENCE_PATTERN = re.compile(
     r"(?<![\w/])@(?:(?P<simple>diff|staged)\b|(?P<kind>file|folder|git|url):(?P<value>\S+))"
@@ -340,9 +341,7 @@ def _resolve_path(cwd: Path, target: str, *, allowed_root: Path | None = None) -
 
 def _ensure_reference_path_allowed(path: Path) -> None:
     home = Path(os.path.expanduser("~")).resolve()
-    hermes_home = Path(
-        os.getenv("HERMES_HOME", str(home / ".hermes"))
-    ).expanduser().resolve()
+    hermes_home = get_nchat_home().resolve()
 
     blocked_exact = {home / rel for rel in _SENSITIVE_HOME_FILES}
     blocked_exact.add(hermes_home / ".env")

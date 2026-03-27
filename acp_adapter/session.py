@@ -8,7 +8,7 @@ history.
 """
 from __future__ import annotations
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_nchat_home
 
 import copy
 import json
@@ -253,7 +253,7 @@ class SessionManager:
             import os
             from pathlib import Path
             from hermes_state import SessionDB
-            hermes_home = get_hermes_home()
+            hermes_home = get_nchat_home()
             self._db_instance = SessionDB(db_path=hermes_home / "state.db")
             return self._db_instance
         except Exception:

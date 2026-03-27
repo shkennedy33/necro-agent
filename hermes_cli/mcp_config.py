@@ -21,7 +21,7 @@ from hermes_cli.config import (
     save_config,
     get_env_value,
     save_env_value,
-    get_hermes_home,  # noqa: F401 — used by test mocks
+    get_nchat_home,  # noqa: F401 — used by test mocks
 )
 from hermes_cli.colors import Colors, color
 

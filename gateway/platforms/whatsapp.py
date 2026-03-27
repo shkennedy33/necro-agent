@@ -25,7 +25,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
 from typing import Dict, Optional, Any
 
-from hermes_cli.config import get_hermes_home
+from hermes_cli.config import get_nchat_home
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
         )
         self._session_path: Path = Path(config.extra.get(
             "session_path",
-            get_hermes_home() / "whatsapp" / "session"
+            get_nchat_home() / "whatsapp" / "session"
         ))
         self._reply_prefix: Optional[str] = config.extra.get("reply_prefix")
         self._message_queue: asyncio.Queue = asyncio.Queue()

@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 
-def get_hermes_home() -> Path:
+def get_nchat_home() -> Path:
     """Return the data directory (default: ~/.nchat).
 
     Reads NCHAT_HOME env var (or legacy HERMES_HOME), falls back to ~/.nchat.
@@ -19,6 +19,10 @@ def get_hermes_home() -> Path:
         or os.getenv("HERMES_HOME")
         or str(Path.home() / ".nchat")
     )
+
+
+# Legacy alias — hermes internals still import this name
+get_hermes_home = get_nchat_home
 
 
 VALID_REASONING_EFFORTS = ("xhigh", "high", "medium", "low", "minimal")

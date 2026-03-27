@@ -9,6 +9,8 @@ import os
 import re
 import time
 from pathlib import Path
+
+from hermes_constants import get_nchat_home
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -489,8 +491,7 @@ def fetch_endpoint_model_metadata(
 
 def _get_context_cache_path() -> Path:
     """Return path to the persistent context length cache file."""
-    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-    return hermes_home / "context_length_cache.yaml"
+    return get_nchat_home() / "context_length_cache.yaml"
 
 
 def _load_context_cache() -> Dict[str, int]:

@@ -32,7 +32,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_nchat_home
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def get_stt_model_from_config() -> Optional[str]:
     """
     try:
         import yaml
-        cfg_path = get_hermes_home() / "config.yaml"
+        cfg_path = get_nchat_home() / "config.yaml"
         if cfg_path.exists():
             with open(cfg_path) as f:
                 data = yaml.safe_load(f) or {}

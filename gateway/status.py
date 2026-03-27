@@ -17,7 +17,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from hermes_constants import get_hermes_home
+from hermes_constants import get_nchat_home
 from typing import Any, Optional
 
 _GATEWAY_KIND = "hermes-gateway"
@@ -27,7 +27,7 @@ _LOCKS_DIRNAME = "gateway-locks"
 
 def _get_pid_path() -> Path:
     """Return the path to the gateway PID file, respecting HERMES_HOME."""
-    home = get_hermes_home()
+    home = get_nchat_home()
     return home / "gateway.pid"
 
 

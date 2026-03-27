@@ -1854,8 +1854,8 @@ class DiscordAdapter(BasePlatformAdapter):
     @staticmethod
     def _thread_state_path() -> Path:
         """Path to the persisted thread participation set."""
-        from hermes_cli.config import get_hermes_home
-        return get_hermes_home() / "discord_threads.json"
+        from hermes_cli.config import get_nchat_home
+        return get_nchat_home() / "discord_threads.json"
 
     @classmethod
     def _load_participated_threads(cls) -> set:

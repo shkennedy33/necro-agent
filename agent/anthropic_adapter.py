@@ -15,7 +15,7 @@ import logging
 import os
 from pathlib import Path
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_nchat_home
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 

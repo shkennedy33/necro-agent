@@ -17,7 +17,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from hermes_constants import get_hermes_home
+from hermes_constants import get_nchat_home
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ def _resolve_timezone_name() -> str:
     # 2. config.yaml ``timezone`` key
     try:
         import yaml
-        hermes_home = get_hermes_home()
+        hermes_home = get_nchat_home()
         config_path = hermes_home / "config.yaml"
         if config_path.exists():
             with open(config_path) as f:

@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 from hermes_cli.auth import AuthError, resolve_provider
 from hermes_cli.colors import Colors, color
-from hermes_cli.config import get_env_path, get_env_value, get_hermes_home, load_config
+from hermes_cli.config import get_env_path, get_env_value, get_nchat_home, load_config
 from hermes_cli.models import provider_label
 from hermes_cli.runtime_provider import resolve_requested_provider
 from hermes_constants import OPENROUTER_MODELS_URL
@@ -310,7 +310,7 @@ def show_status(args):
     print()
     print(color("◆ Scheduled Jobs", Colors.CYAN, Colors.BOLD))
     
-    jobs_file = get_hermes_home() / "cron" / "jobs.json"
+    jobs_file = get_nchat_home() / "cron" / "jobs.json"
     if jobs_file.exists():
         import json
         try:
@@ -330,7 +330,7 @@ def show_status(args):
     print()
     print(color("◆ Sessions", Colors.CYAN, Colors.BOLD))
     
-    sessions_file = get_hermes_home() / "sessions" / "sessions.json"
+    sessions_file = get_nchat_home() / "sessions" / "sessions.json"
     if sessions_file.exists():
         import json
         try:
