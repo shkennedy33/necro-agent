@@ -25,7 +25,7 @@ from nchat.loom import Loom, Turn, GateCallRecord
 from nchat.medium import CodeMedium, GateSpec, Observation
 from nchat.sandbox import PythonSandbox, SandboxResult
 from nchat.compose import ComposeEngine, CanTripConfig, CanTripHandle
-from nchat.fold import fold_code_context, should_fold
+from nchat.fold import fold_code_context, fold_conversation_context, should_fold
 
 __all__ = [
     # Crystals
@@ -43,5 +43,5 @@ __all__ = [
     # Compose (Phase 7b)
     "ComposeEngine", "CanTripConfig", "CanTripHandle",
     # Fold (spec §6.8)
-    "fold_code_context", "should_fold",
+    "fold_code_context", "fold_conversation_context", "should_fold",
 ]

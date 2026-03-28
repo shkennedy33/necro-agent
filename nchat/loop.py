@@ -27,7 +27,7 @@ from uuid import uuid4
 from nchat.crystals import Crystal
 from nchat.wards import Circle
 from nchat.loom import Loom, Turn, GateCallRecord
-from nchat.fold import fold_code_context, should_fold
+from nchat.fold import fold_code_context, fold_conversation_context, should_fold
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +192,7 @@ def run_cast(
     total_prompt_tokens = 0
     total_completion_tokens = 0
     start_time = time.monotonic()
+    fold_count = 0
 
     # Content-with-tools fallback: when the model delivers its answer
     # alongside tool calls (e.g. "Here's your answer" + memory save),
@@ -558,7 +559,25 @@ def run_cast(
             turn_duration_ms, "running",
         )
 
-        # ── 11. Context pressure — compress if needed ─────────────────
+        # ── 11. Context folding + compression fallback ─────────────────
+        total_tokens = total_prompt_tokens + total_completion_tokens
+        if should_fold(
+            turn_count, len(messages), total_tokens, fold_count,
+            min_turns_before_fold=10,   # conversation turns are lighter
+            token_threshold=120_000,    # slightly higher than code medium
+            message_threshold=30,       # conversation has more messages per turn
+        ):
+            messages, did_fold = fold_conversation_context(
+                messages,
+                protect_last_n=10,  # ~5 recent tool turns
+                protect_first_n=2,
+                current_turn=turn_count,
+            )
+            if did_fold:
+                fold_count += 1
+                logger.info("Conversation fold #%d at turn %d", fold_count, turn_count)
+
+        # Fallback: compaction if folding wasn't enough
         if bridge and bridge.compression_enabled:
             compressor = bridge.context_compressor
             new_tool_msgs = messages[msg_count_before:]
