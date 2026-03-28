@@ -249,6 +249,12 @@ class CodeMedium:
         self._done = False
         self._answer = ""
 
+    def introspect_sandbox(self) -> Dict[str, Any]:
+        """Return current sandbox variable state for fold summaries."""
+        if self._sandbox and self._sandbox.alive:
+            return self._sandbox.introspect()
+        return {}
+
     def format_viewport(self, result: SandboxResult) -> str:
         """Apply viewport principle: metadata + preview, not raw dump.
 

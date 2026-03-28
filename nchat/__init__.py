@@ -15,21 +15,23 @@ The nchat package provides the fork's new subsystems:
   medium    — Code medium: entity writes programs, gates are host functions (Phase 7a)
   sandbox   — Python subprocess sandbox with RPC gate injection (Phase 7a)
   compose   — Familiar pattern: cantrip/cast/cast_batch (Phase 7b)
+  fold      — Context folding for code medium (spec §6.8)
 """
 
 from nchat.crystals import CrystalTier, Crystal, resolve_crystal, resolve_model_id
-from nchat.wards import MaxTurns, BudgetWarning, PostCastReview, Circle, compose_wards
+from nchat.wards import MaxTurns, MaxTokens, BudgetWarning, PostCastReview, Circle, compose_wards
 from nchat.loop import CastResult, TurnRecord, AgentBridge, ContextOverflowError, MaxRetriesError
 from nchat.loom import Loom, Turn, GateCallRecord
 from nchat.medium import CodeMedium, GateSpec, Observation
 from nchat.sandbox import PythonSandbox, SandboxResult
 from nchat.compose import ComposeEngine, CanTripConfig, CanTripHandle
+from nchat.fold import fold_code_context, should_fold
 
 __all__ = [
     # Crystals
     "CrystalTier", "Crystal", "resolve_crystal", "resolve_model_id",
     # Wards
-    "MaxTurns", "BudgetWarning", "PostCastReview", "Circle", "compose_wards",
+    "MaxTurns", "MaxTokens", "BudgetWarning", "PostCastReview", "Circle", "compose_wards",
     # Loop
     "CastResult", "TurnRecord", "AgentBridge",
     "ContextOverflowError", "MaxRetriesError",
@@ -40,4 +42,6 @@ __all__ = [
     "PythonSandbox", "SandboxResult",
     # Compose (Phase 7b)
     "ComposeEngine", "CanTripConfig", "CanTripHandle",
+    # Fold (spec §6.8)
+    "fold_code_context", "should_fold",
 ]

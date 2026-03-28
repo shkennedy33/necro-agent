@@ -176,6 +176,34 @@ while True:
             "gate_calls": list(_gate_call_log),
         })
 
+    elif msg_type == "introspect":
+        # Return summary of user-defined variables in the namespace
+        _vars = {}
+        _skip = {
+            "__builtins__", "_gate_call", "json_parse", "submit_answer",
+            "json", "os", "sys", "io", "importlib", "_done", "_answer",
+        }
+        for _k, _v in _ns.items():
+            if _k.startswith("_") or _k in _skip or callable(_v):
+                continue
+            if hasattr(_v, "__module__") and getattr(_v, "__module__", "").startswith(("builtins", "json", "os")):
+                continue
+            try:
+                _t = type(_v).__name__
+                if isinstance(_v, str):
+                    _vars[_k] = {"type": "str", "len": len(_v)}
+                elif isinstance(_v, (list, tuple)):
+                    _vars[_k] = {"type": _t, "len": len(_v)}
+                elif isinstance(_v, dict):
+                    _vars[_k] = {"type": "dict", "keys": len(_v)}
+                elif isinstance(_v, (int, float, bool)):
+                    _vars[_k] = {"type": _t, "value": str(_v)[:50]}
+                else:
+                    _vars[_k] = {"type": _t}
+            except Exception:
+                _vars[_k] = {"type": "unknown"}
+        _send({"type": "introspect_result", "variables": _vars})
+
     elif msg_type == "shutdown":
         _send({"type": "shutdown_ack"})
         break
@@ -538,6 +566,23 @@ class PythonSandbox:
                 name=name, arguments=args_preview,
                 result_preview=error_msg[:200], error=True,
             )
+
+    def introspect(self) -> Dict[str, Any]:
+        """Query sandbox for current user-defined variable state.
+
+        Returns a dict of {var_name: {type, len/keys/value}} for all
+        non-private, non-builtin, non-callable variables in the sandbox
+        namespace. Used by context folding to summarize what state the
+        entity has available without needing to re-read the turns.
+        """
+        if not self.alive:
+            return {}
+        with self._lock:
+            self._send({"type": "introspect"})
+            msg = self._recv(timeout=5)
+            if msg and msg.get("type") == "introspect_result":
+                return msg.get("variables", {})
+            return {}
 
     def close(self) -> None:
         """Shutdown the sandbox subprocess and clean up."""

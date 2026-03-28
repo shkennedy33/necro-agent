@@ -27,6 +27,7 @@ from uuid import uuid4
 from nchat.crystals import Crystal
 from nchat.wards import Circle
 from nchat.loom import Loom, Turn, GateCallRecord
+from nchat.fold import fold_code_context, should_fold
 
 logger = logging.getLogger(__name__)
 
@@ -634,6 +635,7 @@ def _run_code_cast(
     total_completion_tokens = 0
     start_time = time.monotonic()
     token_warning_sent = False
+    fold_count = 0
 
     # System prompt: identity + medium documentation
     active_system_prompt = call
@@ -849,7 +851,26 @@ def _run_code_cast(
                     ),
                 })
 
-        # ── 10. Context pressure — compress if needed ─────────────────
+        # ── 10. Context folding ─────────────────────────────────────────
+        # Folding (spec §6.8): integrate old turns into sandbox state.
+        # Unlike compaction, sandbox variables persist — folded knowledge
+        # isn't lost, it's just removed from the prompt.
+        total_tokens = total_prompt_tokens + total_completion_tokens
+        if should_fold(
+            turn_count, len(messages), total_tokens, fold_count,
+        ):
+            sandbox_vars = medium.introspect_sandbox()
+            messages, did_fold = fold_code_context(
+                messages, sandbox_vars,
+                protect_last_n=6,  # ~3 recent code turns
+                protect_first_n=2,  # user intent + first response
+                current_turn=turn_count,
+            )
+            if did_fold:
+                fold_count += 1
+                logger.info("Fold #%d complete at turn %d", fold_count, turn_count)
+
+        # Fallback: if folding wasn't enough, use compaction
         if bridge and bridge.compression_enabled:
             compressor = bridge.context_compressor
             estimated_next = (
