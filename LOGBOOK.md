@@ -1,5 +1,47 @@
 # Necronomichat v2 — Logbook
 
+## 2026-03-28 — Token audit: auxiliary model routing + cost optimization
+
+### Audit findings
+With env properly loaded, auxiliary tasks resolve via OpenRouter auto-detection chain:
+- `_resolve_auto()` chain: OpenRouter → Nous → Custom → Codex → API key
+- Without env loaded: falls through to Anthropic API (claude-haiku) — wrong/expensive
+- With env loaded: correctly resolves to OpenRouter
+
+### Before (all tasks on auto → gemini-3-flash-preview)
+| Task | Model | Input $/M |
+|------|-------|-----------|
+| All auxiliary | google/gemini-3-flash-preview | $0.50 |
+| compression | minimax/minimax-m2.7 | $0.30 |
+| Primary | anthropic/claude-opus-4.6 | $5.00 |
+
+### After (explicit models per task)
+| Task | Model | Input $/M | Rationale |
+|------|-------|-----------|-----------|
+| compression | minimax/minimax-m2.7 | $0.30 | Proven, handles tool calls |
+| flush_memories | minimax/minimax-m2.7 | $0.30 | Needs tool calls for memory writes |
+| web_extract | qwen/qwen-2.5-72b-instruct | $0.12 | Just text extraction, cheapest |
+| session_search | qwen/qwen-2.5-72b-instruct | $0.12 | Just relevance scoring |
+| skills_hub | google/gemini-3-flash-preview | $0.50 | Needs good instruction following |
+| approval | google/gemini-3-flash-preview | $0.50 | Safety-critical, keep reliable |
+| mcp | google/gemini-3-flash-preview | $0.50 | Needs function calling |
+| vision | auto (multimodal required) | varies | |
+
+### Iteration limit summary → auxiliary model
+Both initial and retry summary generation in `run_agent.py` now try `call_llm(task="compression")`
+before falling back to primary model. On VPS this routes to minimax-m2.7 ($0.30/M) instead of
+Opus ($5.00/M) — a 16x cost reduction for summary generation that sends the full conversation context.
+
+### Pricing reference (OpenRouter, March 2026)
+- Opus 4.6: $5.00/$25.00 per M tokens
+- Sonnet 4.6: $3.00/$15.00
+- Gemini 3 Flash: $0.50/$3.00
+- Kimi K2: $0.57/$2.30
+- Minimax m2.7: $0.30/$1.20
+- Qwen 2.5 72B: $0.12/$0.39
+
+---
+
 ## 2026-03-28 — Context folding for code medium (cantrip spec §6.8)
 
 Implemented the cantrip spec's folding concept — distinct from the existing compaction system.
