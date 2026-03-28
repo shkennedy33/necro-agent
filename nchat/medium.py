@@ -336,9 +336,9 @@ think in. Every response is a program that runs in a persistent sandbox.
 {chr(10).join(gate_lines)}
 
 ### Submitting answers
-Call `submit_answer(result)` when you have a final answer for the user.
-The result string is what the user sees. Your code is your thinking —
-the answer is what you deliver.
+IMPORTANT: Call `submit_answer(result)` to deliver your response to the user.
+print() is for your own debugging — the user ONLY sees the submit_answer string.
+Your code is your thinking. submit_answer is your voice.
 
 ### Observations
 After each turn, you see a viewport summary: gate call results (first 150 chars),

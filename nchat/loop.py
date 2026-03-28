@@ -719,12 +719,17 @@ def _run_code_cast(
         code = _extract_code_from_response(assistant_message)
 
         if not code:
-            # Model produced text-only (shouldn't happen with required tool_choice)
+            # Model produced text-only (shouldn't happen with required tool_choice).
+            # If the model has content, use it. Otherwise, extract from the last
+            # viewport — the model likely print()-ed its answer instead of calling
+            # submit_answer().
             content = assistant_message.content or ""
+            if not content.strip():
+                content = _extract_last_viewport_answer(messages)
             messages.append({"role": "assistant", "content": content})
 
             _record_loom_turn(
-                loom, entity_id, turn_count, crystal, content, [],
+                loom, entity_id, turn_count, crystal, content[:500], [],
                 turn_prompt_tokens, turn_completion_tokens,
                 turn_duration_ms, "terminated",
             )
@@ -815,10 +820,17 @@ def _run_code_cast(
             bridge.save_session_log(messages)
 
     # ── Ward triggered: truncated ─────────────────────────────────────
+    # Extract answer from medium state or last viewport if no submit_answer
+    truncated_response = None
+    if medium.is_done():
+        truncated_response = medium.answer
+    else:
+        truncated_response = _extract_last_viewport_answer(messages)
     return _build_result(
         messages, entity_id, "truncated", turn_count,
         tool_calls_total, total_prompt_tokens,
         total_completion_tokens, start_time,
+        response=truncated_response,
     )
 
 
@@ -887,6 +899,31 @@ def _extract_code_from_response(assistant_message: Any) -> Optional[str]:
             return args_raw
 
     return None
+
+
+def _extract_last_viewport_answer(messages: List[Dict]) -> str:
+    """Extract the last meaningful console output from code medium viewports.
+
+    When the model print()-ed its answer instead of calling submit_answer(),
+    the answer is in the tool result message's "Console output:" section.
+    Walk backwards through tool results and return the first non-empty output.
+    """
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content", "")
+        if "Console output:" not in content:
+            continue
+        # Extract everything after "Console output:\n"
+        idx = content.index("Console output:")
+        output = content[idx + len("Console output:"):].strip()
+        # Strip trailing "[...N more chars]" truncation notice
+        if output.endswith("]") and "[..." in output:
+            last_bracket = output.rfind("[...")
+            output = output[:last_bracket].strip()
+        if output:
+            return output
+    return ""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
