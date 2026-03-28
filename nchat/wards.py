@@ -30,6 +30,21 @@ class MaxTurns:
 
 
 @dataclass
+class MaxTokens:
+    """Hard token budget. Tracks cumulative prompt + completion tokens.
+
+    When total tokens exceed the limit, the loop terminates with status
+    "truncated". This prevents cost spirals from long-running sessions
+    where context accumulates quadratically.
+
+    The limit applies to the SUM of all prompt_tokens + completion_tokens
+    across all turns in a single cast.
+    """
+    limit: int = 800_000  # ~$15-20 on Opus via OpenRouter
+    code_medium_limit: int = 400_000  # Code medium accumulates faster
+
+
+@dataclass
 class RequireDone:
     """Only explicit done() terminates. Text-only responses continue the loop.
 
@@ -76,6 +91,8 @@ class Circle:
     """
     gate_names: List[str] = field(default_factory=list)
     max_turns: MaxTurns = field(default_factory=MaxTurns)
+    max_tokens: MaxTokens = field(default_factory=MaxTokens)
+    code_medium_max_turns: int = 30  # Separate, lower limit for code medium
     require_done: RequireDone | None = None
     budget_warning: BudgetWarning = field(default_factory=BudgetWarning)
     post_cast_review: PostCastReview | None = None
@@ -85,6 +102,8 @@ class Circle:
         """Get a ward by type, or None if not configured."""
         if ward_type == MaxTurns:
             return self.max_turns
+        if ward_type == MaxTokens:
+            return self.max_tokens
         if ward_type == RequireDone:
             return self.require_done
         if ward_type == BudgetWarning:
@@ -96,6 +115,22 @@ class Circle:
     def has_ward(self, ward_type: type) -> bool:
         """Check if a ward is configured (not None)."""
         return self.get_ward(ward_type) is not None
+
+    def token_budget_exceeded(self, total_tokens: int, is_code_medium: bool = False) -> bool:
+        """Check if the token budget has been exceeded."""
+        limit = (
+            self.max_tokens.code_medium_limit if is_code_medium
+            else self.max_tokens.limit
+        )
+        return total_tokens >= limit
+
+    def token_budget_warning_threshold(self, is_code_medium: bool = False) -> int:
+        """Return 80% of the token budget limit for warning injection."""
+        limit = (
+            self.max_tokens.code_medium_limit if is_code_medium
+            else self.max_tokens.limit
+        )
+        return int(limit * 0.8)
 
     def should_warn(self, current_turn: int) -> bool:
         """Check if the budget warning should fire at this turn."""
@@ -143,11 +178,17 @@ def load_circle_from_config(config: Dict[str, Any] | None = None) -> Circle:
     wards_config = config.get("wards", {})
     max_turns_limit = wards_config.get("max_turns", 90)
     budget_threshold = wards_config.get("budget_warning_at", 0.8)
+    max_tokens_limit = wards_config.get("max_tokens", 800_000)
+    code_medium_max_tokens = wards_config.get("code_medium_max_tokens", 400_000)
 
     # Also check agent.max_turns for backward compat
     agent_config = config.get("agent", {})
     if "max_turns" in agent_config:
         max_turns_limit = agent_config["max_turns"]
+
+    # Code medium max_turns override (much lower default)
+    medium_config = config.get("medium", {})
+    code_medium_max_turns = medium_config.get("max_turns", 30)
 
     # Review config
     review_config = config.get("review", {})
@@ -174,6 +215,11 @@ def load_circle_from_config(config: Dict[str, Any] | None = None) -> Circle:
 
     return Circle(
         max_turns=MaxTurns(limit=max_turns_limit),
+        max_tokens=MaxTokens(
+            limit=max_tokens_limit,
+            code_medium_limit=code_medium_max_tokens,
+        ),
+        code_medium_max_turns=code_medium_max_turns,
         budget_warning=BudgetWarning(
             threshold=budget_threshold if budget_threshold else None,
         ),

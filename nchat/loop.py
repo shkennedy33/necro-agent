@@ -293,6 +293,16 @@ def run_cast(
         total_prompt_tokens += turn_prompt_tokens
         total_completion_tokens += turn_completion_tokens
 
+        # ── Token budget check ──────────────────────────────────────
+        total_tokens = total_prompt_tokens + total_completion_tokens
+        if circle.token_budget_exceeded(total_tokens, is_code_medium=False):
+            logger.warning(
+                "Token budget exceeded in conversation cast: %d tokens "
+                "(limit %d). Terminating.",
+                total_tokens, circle.max_tokens.limit,
+            )
+            break
+
         # ── 5. Normalize response ─────────────────────────────────────
         if bridge:
             assistant_message, finish_reason = bridge.normalize_response(
@@ -616,12 +626,14 @@ def _run_code_cast(
     if intent:
         messages.append({"role": "user", "content": intent})
 
-    max_turns = circle.max_turns.limit
+    # Code medium uses its own (lower) turn limit
+    max_turns = circle.code_medium_max_turns
     turn_count = 0
     tool_calls_total = 0
     total_prompt_tokens = 0
     total_completion_tokens = 0
     start_time = time.monotonic()
+    token_warning_sent = False
 
     # System prompt: identity + medium documentation
     active_system_prompt = call
@@ -707,6 +719,25 @@ def _run_code_cast(
 
         total_prompt_tokens += turn_prompt_tokens
         total_completion_tokens += turn_completion_tokens
+
+        # Per-turn cost logging
+        total_tokens = total_prompt_tokens + total_completion_tokens
+        logger.info(
+            "Code cast turn %d/%d: +%d prompt, +%d completion. "
+            "Cumulative: %d tokens (%d prompt + %d completion)",
+            turn_count, max_turns,
+            turn_prompt_tokens, turn_completion_tokens,
+            total_tokens, total_prompt_tokens, total_completion_tokens,
+        )
+
+        # ── Token budget check ──────────────────────────────────────
+        if circle.token_budget_exceeded(total_tokens, is_code_medium=True):
+            logger.warning(
+                "Token budget exceeded in code cast: %d tokens "
+                "(limit %d). Terminating.",
+                total_tokens, circle.max_tokens.code_medium_limit,
+            )
+            break
 
         # ── 4. Extract code from response ─────────────────────────────
         if not response or not response.choices:
@@ -794,12 +825,29 @@ def _run_code_cast(
             )
 
         # ── 9. Budget warning at threshold ────────────────────────────
+        # Turn-based warning
         if circle.should_warn(turn_count):
             remaining = max_turns - turn_count
             messages.append({
                 "role": "system",
                 "content": circle.budget_warning_message(remaining),
             })
+
+        # Token-based warning (fires once at 80% of token budget)
+        if not token_warning_sent:
+            total_tokens = total_prompt_tokens + total_completion_tokens
+            warn_at = circle.token_budget_warning_threshold(is_code_medium=True)
+            if total_tokens >= warn_at:
+                token_warning_sent = True
+                remaining_tokens = circle.max_tokens.code_medium_limit - total_tokens
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[Ward: Token budget at 80%. ~{remaining_tokens:,} tokens remaining. "
+                        f"You have used {total_tokens:,} tokens across {turn_count} turns. "
+                        f"Wrap up and call submit_answer() soon.]"
+                    ),
+                })
 
         # ── 10. Context pressure — compress if needed ─────────────────
         if bridge and bridge.compression_enabled:
