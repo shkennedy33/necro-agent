@@ -2903,6 +2903,8 @@ class AIAgent:
             "messages": messages,
             "api_calls": result.turns,
             "completed": completed,
+            "failed": result.status == "failed",
+            "error": result.error,
             "partial": False,
             "history_offset": _history_offset,
             "interrupted": interrupted,

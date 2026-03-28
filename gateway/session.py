@@ -973,8 +973,31 @@ class SessionStore:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
-        """Load all messages from a session's transcript."""
-        # Try SQLite first
+        """Load all messages from a session's transcript.
+
+        Prefers JSONL (append-only ground truth) over SQLite, which may
+        contain only a partial snapshot from incremental flushes.
+        """
+        # Try JSONL first — it's the append-only ground truth
+        transcript_path = self.get_transcript_path(session_id)
+
+        if transcript_path.exists():
+            messages = []
+            with open(transcript_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            messages.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "Skipping corrupt line in transcript %s: %s",
+                                session_id, line[:120],
+                            )
+            if messages:
+                return messages
+
+        # Fall back to SQLite (may have partial data but better than nothing)
         if self._db:
             try:
                 messages = self._db.get_messages_as_conversation(session_id)
@@ -982,27 +1005,8 @@ class SessionStore:
                     return messages
             except Exception as e:
                 logger.debug("Could not load messages from DB: %s", e)
-        
-        # Fall back to legacy JSONL
-        transcript_path = self.get_transcript_path(session_id)
-        
-        if not transcript_path.exists():
-            return []
-        
-        messages = []
-        with open(transcript_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        messages.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "Skipping corrupt line in transcript %s: %s",
-                            session_id, line[:120],
-                        )
-        
-        return messages
+
+        return []
 
 
 def build_session_context(
