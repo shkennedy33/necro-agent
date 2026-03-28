@@ -79,6 +79,7 @@ class Circle:
     require_done: RequireDone | None = None
     budget_warning: BudgetWarning = field(default_factory=BudgetWarning)
     post_cast_review: PostCastReview | None = None
+    max_depth: int = 2  # Maximum delegation depth for composition (Phase 7b)
 
     def get_ward(self, ward_type: type) -> Any:
         """Get a ward by type, or None if not configured."""
@@ -168,10 +169,41 @@ def load_circle_from_config(config: Dict[str, Any] | None = None) -> Circle:
             min_turns=review_config.get("min_turns", 5),
         )
 
+    # Max depth
+    max_depth = wards_config.get("max_depth", 2)
+
     return Circle(
         max_turns=MaxTurns(limit=max_turns_limit),
         budget_warning=BudgetWarning(
             threshold=budget_threshold if budget_threshold else None,
         ),
         post_cast_review=post_cast_review,
+        max_depth=max_depth,
     )
+
+
+def compose_wards(
+    parent_circle: Circle,
+    child_wards: Dict[str, Any],
+    parent_remaining_turns: int,
+) -> Dict[str, Any]:
+    """Compose child wards with parent constraints (WARD-1).
+
+    Children can only be more restricted than parents:
+      - max_turns: min(child_config, parent_remaining_turns)
+      - max_depth: parent_max_depth - 1
+      - require_done: logical OR (if parent requires it, child requires it)
+
+    Returns a dict of composed ward values for child construction.
+    """
+    child_max = child_wards.get("max_turns", 25)
+    composed_max = min(child_max, parent_remaining_turns)
+
+    return {
+        "max_turns": max(1, composed_max),
+        "max_depth": max(0, parent_circle.max_depth - 1),
+        "require_done": (
+            parent_circle.require_done is not None
+            or child_wards.get("require_done", False)
+        ),
+    }

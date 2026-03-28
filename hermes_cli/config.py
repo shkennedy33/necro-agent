@@ -139,7 +139,17 @@ DEFAULT_CONFIG = {
     "agent": {
         "max_turns": 90,
     },
-    
+
+    # Code medium — entity thinks in Python code instead of tool_calls.
+    # When type is "code", the agent gets one "execute" tool and writes programs.
+    # Gates (tools) become host functions callable from the sandbox.
+    "medium": {
+        "type": "conversation",       # "conversation" (default) or "code"
+        "viewport_limit": 500,        # Max chars of console output per turn
+        "timeout": 300,               # Sandbox execution timeout (seconds)
+        "persist_state": True,        # Keep variables across turns
+    },
+
     "terminal": {
         "backend": "local",
         "cwd": ".",  # Use current directory

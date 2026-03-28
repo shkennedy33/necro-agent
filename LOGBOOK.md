@@ -1,5 +1,173 @@
 # Necronomichat v2 — Logbook
 
+## 2026-03-27 — Phase 7 polish: config, progress display, minor fixes
+
+### CLI config for medium
+- Added `medium` section to `DEFAULT_CONFIG` in `hermes_cli/config.py`
+- Keys: `medium.type` ("conversation" | "code"), `medium.viewport_limit`, `medium.timeout`, `medium.persist_state`
+- `hermes config set medium.type code` now works out of the box
+
+### Progress display for code medium (gateway + CLI)
+Code medium was invisible to users — no progress messages during execution. Now uses the same `tool_progress_callback` system as conversation mode.
+
+**How it works:**
+- `CodeMedium` accepts `progress_callback` — fires on each `execute()` call with a code preview
+- `PythonSandbox._dispatch_gate_call()` fires the callback on each gate call with a gate-specific preview
+- `_code_preview(code)`: extracts first meaningful line (skips comments/imports), truncated to 80 chars
+- `_gate_preview(name, args)`: per-gate preview extraction (path for file ops, command for terminal, query for search, etc.)
+- `run_agent.py:_create_code_medium()` passes `self.tool_progress_callback` through
+- `ComposeEngine` propagates `progress_callback` to child code mediums
+
+**What users see (telegram/discord/etc):**
+```
+🔮 execute: "result = read_file(path='src/main.py')"
+📄 read_file: "src/main.py"
+⚡ terminal: "ls -la /tmp"
+🔮 execute: "submit_answer(analysis)"
+```
+
+**Files modified:**
+- `nchat/sandbox.py` — `progress_callback` param on PythonSandbox, `_gate_preview()` helper
+- `nchat/medium.py` — `progress_callback` param on CodeMedium, `_code_preview()` helper
+- `nchat/compose.py` — `progress_callback` param on ComposeEngine, propagated to children
+- `run_agent.py` — passes `tool_progress_callback` to CodeMedium and ComposeEngine
+- `agent/display.py` — added "execute" to `build_tool_preview` primary_args map
+- `hermes_cli/config.py` — added `medium` section to DEFAULT_CONFIG
+
+### Bug fix
+- `_gate_call` was missing from sandbox child's `_ns` namespace (found during Phase 7 verification). Typed gate stubs referenced it but it wasn't injected. Fixed by adding `"_gate_call": _gate_call` to the namespace dict.
+
+---
+
+## 2026-03-27 — Phase 7: The Medium Shift (7a + 7b)
+
+### Summary
+Implemented Phase 7a (code as primary medium) and Phase 7b (familiar pattern / composition). The entity can now think in code — every turn is a Python program with gate functions as host-provided async calls. In 7b, the entity can construct and orchestrate child entities at runtime via `cantrip()/cast()/cast_batch()`.
+
+### Phase 7a: Code as Primary Medium (COMPLETE)
+
+**New files:**
+- `nchat/sandbox.py` (~350 lines) — PythonSandbox class
+  - Long-lived subprocess with stdin/stdout JSON-RPC protocol
+  - Gate functions injected as typed Python stubs (21 typed stubs + generic fallback)
+  - State persists across turns (same `_ns` namespace dict for all exec() calls)
+  - Cross-platform: works on Windows + Linux (no UDS, no os.setsid dependency)
+  - Safe environment: API keys/secrets filtered from child env
+  - Thread-safe execute() with lock serialization
+  - SANDBOX_CHILD_SCRIPT: self-contained child process (~100 lines, no nchat/hermes imports)
+
+- `nchat/medium.py` (~300 lines) — CodeMedium class
+  - `register_gate(GateSpec)` + `register_gates_from_registry(gate_names)` — wraps tool handlers
+  - `execute(code) → Observation` — runs in sandbox, returns viewport-formatted result
+  - `format_viewport(result)` — THE key design decision: metadata + preview, not raw dumps
+    - Gate results: first 150 chars + total length
+    - Console output: up to viewport_limit (default 500), then truncated
+    - Errors: FULL stack trace (never truncated — errors are steering)
+  - `capability_text()` — medium documentation for system prompt (~400 tokens vs ~3,300 tokens of tool schemas)
+  - `execute_tool_schema()` — single "execute" tool (replaces 20+ tool schemas)
+  - `is_done()` / `answer` — tracks submit_answer() state for loop termination
+  - 22 gate signatures (GATE_SIGNATURES) for system prompt documentation
+
+**Modified files:**
+- `nchat/loop.py` — added `_run_code_cast()` (~200 lines)
+  - `run_cast()` now accepts `medium` parameter; routes to code path when set
+  - `_run_code_cast()`: clean 11-step turn cycle for code medium
+  - `_query_crystal_direct()`: direct API call (no bridge overhead for code medium)
+  - `_extract_code_from_response()`: extracts code from execute tool call
+  - tool_choice="required" with fallback to "auto" if provider doesn't support it
+- `nchat/call.py` — added `medium_capability_text` parameter to `build_system_prompt_compact()`
+  - When set, replaces standard capability presentation with medium documentation
+  - Memory/user profile/skills still included alongside medium docs
+
+### Phase 7b: The Familiar Pattern (COMPLETE)
+
+**New files:**
+- `nchat/compose.py` (~300 lines) — ComposeEngine class
+  - `cantrip_gate(args) → handle_id` — creates child entity configuration
+  - `cast_gate(args) → str` — runs child, blocks until complete, returns result
+  - `cast_batch_gate(args) → JSON` — parallel execution with semaphore (max_concurrent=8)
+  - `dispose_gate(args)` — cleanup unused handles
+  - Three child types:
+    - **Leaf cantrip** (medium=None): single LLM call, cheapest possible delegation
+    - **Conversation child** (medium="conversation"): tool-calling loop via run_cast
+    - **Code child** (medium="python"): new sandbox + code loop
+  - Ward composition (WARD-1): children can only be more restricted than parents
+  - Depth limits: at depth 0, cantrip/cast gates are not registered
+  - Security: child gate sets validated against parent's gate set
+  - Handles consumed on cast; double-cast returns error
+  - `_resolve_child_crystal()`: resolves tier names + model ID passthrough
+  - Loom integration: child turns recorded with parent_id for tree reconstruction
+
+**Modified files:**
+- `nchat/wards.py` — added `max_depth` field to Circle (default 2), `compose_wards()` function
+- `nchat/crystals.py` — added `resolve_model_id()` for arbitrary model ID strings
+  - Supports "anthropic/claude-sonnet-4-6", "openrouter/google/gemini-3-flash", bare model names
+- `nchat/__init__.py` — exports all Phase 7 types (25 total symbols)
+
+### Architecture after Phase 7
+```
+nchat/
+  __init__.py        # 25 exports
+  crystals.py        # Three-tier + model ID passthrough
+  call.py            # Identity + medium capability text integration
+  wards.py           # MaxTurns, BudgetWarning, PostCastReview, compose_wards
+  review.py          # Post-cast review cantrip
+  loop.py            # Conversation + code medium paths
+  dispatch.py        # Tool call routing
+  api.py             # API call construction
+  session.py         # Session persistence
+  stream.py          # Streaming handler
+  loom.py            # Turn recording (parent_id for composition trees)
+  medium.py          # CodeMedium + viewport formatting (NEW)
+  sandbox.py         # PythonSandbox + RPC protocol (NEW)
+  compose.py         # ComposeEngine + familiar pattern (NEW)
+```
+
+### Key design decisions
+1. **Viewport principle**: entity code output is formatted as metadata + preview, not raw dumps. Data lives in sandbox variables, not in context window.
+2. **Direct crystal queries**: code medium bypasses the bridge's query_api (no streaming/TUI needed for internal code). Uses `_query_crystal_direct()` directly.
+3. **Stdin/stdout RPC**: sandbox uses stdin/stdout pipes (not UDS) for cross-platform compatibility. Child's print() output captured in StringIO; original stdout used for RPC.
+4. **Submit_answer as function**: entity calls `submit_answer("result")` in code to terminate. Not a gate call — it's a local function that sets a flag. The result goes to the user.
+5. **Ward composition is conservative**: child max_turns = min(child_requested, parent_remaining). Depth decrements. At depth 0, composition gates vanish.
+6. **Handles are consumed**: after cast(), the handle is auto-disposed. Double-cast returns an error. This prevents resource leaks.
+
+### Token economics (code medium vs conversation)
+- System prompt: ~600 tokens (medium docs + gate signatures) vs ~3,300 tokens (20+ tool schemas)
+- Per-turn savings: ~2,700 tokens of input per API call
+- Additional savings from compositional code: one Opus turn does the work of N tool-calling turns
+- Delegation: leaf cantrips are single API calls (cheapest possible)
+
+### Wiring into hermes runtime (COMPLETE)
+
+**`run_agent.py`:**
+- `_get_medium_config()`: reads `medium` section from cli-config.yaml
+- `_create_code_medium()`: creates CodeMedium, registers all gates from tool registry, sets up ComposeEngine if depth > 0
+- `_run_via_cast()`: detects `medium.type: code`, creates/passes/cleans up CodeMedium
+- `_build_system_prompt_compact()`: passes `medium_capability_text` through to call.py
+- Status line: `"🔮 Code medium active: N gates, viewport=500, depth=2"`
+
+**Gateway (no changes needed):**
+- submit_answer output flows through existing plumbing: `CastResult.response` → `final_response` → `agent_result["final_response"]` → gateway display
+
+**Bug fix during verification:**
+- `_gate_call` was missing from sandbox child's `_ns` namespace — typed gate stubs referenced it but it wasn't injected. Fixed by adding `"_gate_call": _gate_call` to `_ns`.
+
+### Verified end-to-end
+- All 25 nchat symbols import cleanly
+- All 8 modules load without circular dependencies
+- run_agent.py parses (112 methods, all 4 Phase 7 methods present)
+- Sandbox: start, execute Python, gate calls dispatched to host, state persists across turns, submit_answer terminates, close
+- Viewport formatting: gate results previewed, console output truncated, errors shown in full
+- Ward composition: child clamped to parent remaining, depth decrements
+- System prompt: medium capability text replaces standard tool listing when active
+
+### What's NOT wired yet
+- CLI config: `hermes config set medium.type code` command not implemented
+- CLI progress indicator for code medium turns not implemented
+- The compose engine's `_run_conversation_child()` uses standalone mode (bridge=None) — won't have access to streaming/TUI features
+
+---
+
 ## 2026-03-26 — Fork initiated, all 6 phases complete
 
 ### Summary

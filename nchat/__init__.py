@@ -6,23 +6,38 @@ The nchat package provides the fork's new subsystems:
   call      — Identity/system prompt builder (soul + capability presentation)
   wards     — Structural constraints (MaxTurns, BudgetWarning, PostCastReview)
   review    — Post-cast review cantrip (compressed context on WORKER crystal)
-  loop      — The clean agent loop (target architecture)
+  loop      — The clean agent loop (conversation + code medium)
   dispatch  — Tool call routing through the registry
   api       — API call construction and message sanitization
   session   — Session persistence and title generation
   stream    — Streaming response handler
   loom      — Append-only turn recording (JSONL)
+  medium    — Code medium: entity writes programs, gates are host functions (Phase 7a)
+  sandbox   — Python subprocess sandbox with RPC gate injection (Phase 7a)
+  compose   — Familiar pattern: cantrip/cast/cast_batch (Phase 7b)
 """
 
-from nchat.crystals import CrystalTier, Crystal, resolve_crystal
-from nchat.wards import MaxTurns, BudgetWarning, PostCastReview, Circle
+from nchat.crystals import CrystalTier, Crystal, resolve_crystal, resolve_model_id
+from nchat.wards import MaxTurns, BudgetWarning, PostCastReview, Circle, compose_wards
 from nchat.loop import CastResult, TurnRecord, AgentBridge, ContextOverflowError, MaxRetriesError
 from nchat.loom import Loom, Turn, GateCallRecord
+from nchat.medium import CodeMedium, GateSpec, Observation
+from nchat.sandbox import PythonSandbox, SandboxResult
+from nchat.compose import ComposeEngine, CanTripConfig, CanTripHandle
 
 __all__ = [
-    "CrystalTier", "Crystal", "resolve_crystal",
-    "MaxTurns", "BudgetWarning", "PostCastReview", "Circle",
+    # Crystals
+    "CrystalTier", "Crystal", "resolve_crystal", "resolve_model_id",
+    # Wards
+    "MaxTurns", "BudgetWarning", "PostCastReview", "Circle", "compose_wards",
+    # Loop
     "CastResult", "TurnRecord", "AgentBridge",
     "ContextOverflowError", "MaxRetriesError",
+    # Loom
     "Loom", "Turn", "GateCallRecord",
+    # Medium (Phase 7a)
+    "CodeMedium", "GateSpec", "Observation",
+    "PythonSandbox", "SandboxResult",
+    # Compose (Phase 7b)
+    "ComposeEngine", "CanTripConfig", "CanTripHandle",
 ]

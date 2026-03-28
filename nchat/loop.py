@@ -5,6 +5,10 @@ run_conversation() for compact mode. It accesses AIAgent infrastructure
 through an AgentBridge — a typed interface that documents exactly what the
 loop needs without coupling it to the 7,800-line AIAgent class.
 
+Supports two mediums:
+  - Conversation (default): entity uses tool_calls, tools are OpenAI schemas
+  - Code (Phase 7): entity writes programs, gates are host functions in sandbox
+
 Design principles (from cantrip spec):
   - Strict alternation: utterance, observation, utterance, observation
   - Errors are observations, not failures
@@ -149,6 +153,7 @@ def run_cast(
     entity_id: str | None = None,
     loom: Loom | None = None,
     bridge: AgentBridge | None = None,
+    medium: Any = None,
 ) -> CastResult:
     """Run the agent loop.
 
@@ -162,11 +167,20 @@ def run_cast(
         loom: Loom for per-turn recording. Optional.
         bridge: AgentBridge for AIAgent infrastructure. When None,
                 the loop runs in standalone mode (for testing).
+        medium: CodeMedium instance for code mode. None = conversation mode.
 
     Returns:
         CastResult with the final response, status, and metadata.
     """
     entity_id = entity_id or str(uuid4())
+
+    # Route to code medium path if medium is set
+    if medium is not None:
+        return _run_code_cast(
+            crystal, call, circle, medium, intent, history,
+            entity_id, loom, bridge,
+        )
+
     messages = list(history)
     # Intent was already appended by the caller (run_conversation setup)
     # so we don't append it here.
@@ -577,6 +591,302 @@ def run_cast(
         tool_calls_total, total_prompt_tokens,
         total_completion_tokens, start_time,
     )
+
+
+# ── Code medium cast ──────────────────────────────────────────────────
+
+def _run_code_cast(
+    crystal: Crystal,
+    call: str,
+    circle: Circle,
+    medium: Any,  # CodeMedium
+    intent: str,
+    history: List[Dict],
+    entity_id: str,
+    loom: Loom | None = None,
+    bridge: AgentBridge | None = None,
+) -> CastResult:
+    """Code medium cast — entity writes programs, gates are host functions.
+
+    The entity is given ONE tool (execute) and tool_choice is set to require it.
+    Each turn: model writes code → sandbox executes → viewport observation returned.
+    The loop continues until submit_answer() is called or max_turns is reached.
+    """
+    messages = list(history)
+    if intent:
+        messages.append({"role": "user", "content": intent})
+
+    max_turns = circle.max_turns.limit
+    turn_count = 0
+    tool_calls_total = 0
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    start_time = time.monotonic()
+
+    # System prompt: identity + medium documentation
+    active_system_prompt = call
+
+    # The single tool schema
+    tools = [medium.execute_tool_schema()]
+
+    # Ensure sandbox is running
+    try:
+        medium.start()
+    except Exception as e:
+        return _build_result(
+            messages, entity_id, "failed", 0, 0, 0, 0, start_time,
+            error=f"Sandbox failed to start: {e}",
+        )
+
+    # Compression state
+    compression_attempts = 0
+    max_compression_attempts = 3
+
+    while turn_count < max_turns:
+        # ── 1. Interrupt check ────────────────────────────────────────
+        if bridge and bridge.is_interrupted():
+            return _build_result(
+                messages, entity_id, "interrupted", turn_count,
+                tool_calls_total, total_prompt_tokens,
+                total_completion_tokens, start_time,
+            )
+
+        turn_count += 1
+        turn_start = time.monotonic()
+
+        # ── 2. Build API messages ─────────────────────────────────────
+        if bridge:
+            api_messages = bridge.build_api_messages(
+                active_system_prompt, messages,
+            )
+        else:
+            api_messages = (
+                [{"role": "system", "content": active_system_prompt}]
+                + messages
+            )
+
+        # ── 3. Query the crystal ──────────────────────────────────────
+        turn_prompt_tokens = 0
+        turn_completion_tokens = 0
+
+        try:
+            response, usage_dict = _query_crystal_direct(
+                crystal, api_messages, tools,
+            )
+            turn_prompt_tokens = usage_dict.get("prompt_tokens", 0)
+            turn_completion_tokens = usage_dict.get("completion_tokens", 0)
+
+        except ContextOverflowError:
+            if bridge and bridge.compression_enabled:
+                compression_attempts += 1
+                if compression_attempts > max_compression_attempts:
+                    break
+                approx = sum(len(str(m)) for m in api_messages) // 4
+                messages, active_system_prompt = bridge.compress_context(
+                    messages, None, approx, bridge.task_id,
+                )
+                turn_count -= 1
+                continue
+            break
+
+        except InterruptedError:
+            return _build_result(
+                messages, entity_id, "interrupted", turn_count,
+                tool_calls_total, total_prompt_tokens,
+                total_completion_tokens, start_time,
+            )
+
+        except Exception as e:
+            logger.error("Crystal query failed in code cast: %s", e)
+            return _build_result(
+                messages, entity_id, "failed", turn_count,
+                tool_calls_total, total_prompt_tokens,
+                total_completion_tokens, start_time,
+                error=str(e),
+            )
+
+        total_prompt_tokens += turn_prompt_tokens
+        total_completion_tokens += turn_completion_tokens
+
+        # ── 4. Extract code from response ─────────────────────────────
+        if not response or not response.choices:
+            break
+
+        assistant_message = response.choices[0].message
+        finish_reason = getattr(response.choices[0], "finish_reason", None) or "stop"
+        turn_duration_ms = int((time.monotonic() - turn_start) * 1000)
+
+        code = _extract_code_from_response(assistant_message)
+
+        if not code:
+            # Model produced text-only (shouldn't happen with required tool_choice)
+            content = assistant_message.content or ""
+            messages.append({"role": "assistant", "content": content})
+
+            _record_loom_turn(
+                loom, entity_id, turn_count, crystal, content, [],
+                turn_prompt_tokens, turn_completion_tokens,
+                turn_duration_ms, "terminated",
+            )
+
+            return _build_result(
+                messages, entity_id, "terminated", turn_count,
+                tool_calls_total, total_prompt_tokens,
+                total_completion_tokens, start_time,
+                response=content,
+            )
+
+        tool_calls_total += 1
+
+        # ── 5. Build and append assistant message ─────────────────────
+        tc = assistant_message.tool_calls[0]
+        assistant_msg = {
+            "role": "assistant",
+            "content": assistant_message.content or "",
+            "tool_calls": [{
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }],
+        }
+        messages.append(assistant_msg)
+
+        # ── 6. Execute in sandbox ─────────────────────────────────────
+        observation = medium.execute(code)
+
+        # Append viewport as tool result
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tc.id,
+            "content": observation.viewport,
+        })
+
+        # ── 7. Record loom turn ───────────────────────────────────────
+        _record_loom_turn(
+            loom, entity_id, turn_count, crystal,
+            code[:500],  # utterance is the code (truncated for loom)
+            observation.gate_calls,
+            turn_prompt_tokens, turn_completion_tokens,
+            turn_duration_ms, "running",
+        )
+
+        # ── 8. Check for done (submit_answer) ─────────────────────────
+        if medium.is_done():
+            _record_loom_turn(
+                loom, entity_id, turn_count, crystal,
+                f"submit_answer: {medium.answer[:200]}",
+                observation.gate_calls,
+                0, 0, 0, "terminated",
+            )
+            return _build_result(
+                messages, entity_id, "terminated", turn_count,
+                tool_calls_total, total_prompt_tokens,
+                total_completion_tokens, start_time,
+                response=medium.answer,
+            )
+
+        # ── 9. Budget warning at threshold ────────────────────────────
+        if circle.should_warn(turn_count):
+            remaining = max_turns - turn_count
+            messages.append({
+                "role": "system",
+                "content": circle.budget_warning_message(remaining),
+            })
+
+        # ── 10. Context pressure — compress if needed ─────────────────
+        if bridge and bridge.compression_enabled:
+            compressor = bridge.context_compressor
+            estimated_next = (
+                compressor.last_prompt_tokens
+                + compressor.last_completion_tokens
+                + len(observation.viewport) // 3
+            )
+            if compressor.should_compress(estimated_next):
+                messages, active_system_prompt = bridge.compress_context(
+                    messages, None, compressor.last_prompt_tokens,
+                    bridge.task_id,
+                )
+
+        # ── 11. Save session log ──────────────────────────────────────
+        if bridge:
+            bridge.save_session_log(messages)
+
+    # ── Ward triggered: truncated ─────────────────────────────────────
+    return _build_result(
+        messages, entity_id, "truncated", turn_count,
+        tool_calls_total, total_prompt_tokens,
+        total_completion_tokens, start_time,
+    )
+
+
+def _query_crystal_direct(
+    crystal: Crystal,
+    api_messages: List[Dict],
+    tools: List[Dict],
+    tool_choice: str = "required",
+) -> tuple:
+    """Direct API call for code medium. Returns (response, usage_dict).
+
+    Simpler than the bridge's query_api — no streaming, no Codex adapter,
+    no TUI display. The code medium doesn't need those.
+    """
+    if not crystal.client:
+        raise RuntimeError("Crystal has no client configured")
+
+    try:
+        kwargs: Dict[str, Any] = {
+            "model": crystal.model,
+            "messages": api_messages,
+            "tools": tools,
+        }
+        # Try tool_choice="required" (force tool use); fall back to "auto"
+        try:
+            kwargs["tool_choice"] = tool_choice
+            response = crystal.client.chat.completions.create(**kwargs)
+        except Exception as first_err:
+            if "tool_choice" in str(first_err).lower():
+                kwargs["tool_choice"] = "auto"
+                response = crystal.client.chat.completions.create(**kwargs)
+            else:
+                raise
+
+        usage = getattr(response, "usage", None)
+        usage_dict = {
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
+            "completion_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
+        }
+        return response, usage_dict
+
+    except Exception as e:
+        err_str = str(e).lower()
+        if "context_length" in err_str or "payload" in err_str or "too large" in err_str:
+            raise ContextOverflowError(str(e)) from e
+        raise
+
+
+def _extract_code_from_response(assistant_message: Any) -> Optional[str]:
+    """Extract code from the model's execute tool call."""
+    if not assistant_message.tool_calls:
+        return None
+
+    tc = assistant_message.tool_calls[0]
+    args_raw = tc.function.arguments
+
+    if isinstance(args_raw, dict):
+        return args_raw.get("code", "")
+
+    if isinstance(args_raw, str):
+        try:
+            args = json.loads(args_raw)
+            return args.get("code", "")
+        except json.JSONDecodeError:
+            # Maybe the model put the code directly as the arguments string
+            return args_raw
+
+    return None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────

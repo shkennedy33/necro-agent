@@ -253,3 +253,65 @@ def resolve_all_crystals(
         tier: resolve_crystal(tier, crystals_config, parent_agent)
         for tier in CrystalTier
     }
+
+
+def resolve_model_id(
+    model_id: str,
+    parent_agent: Any = None,
+) -> Crystal:
+    """Resolve an arbitrary model ID string to a Crystal.
+
+    For Phase 7b: the entity can specify model IDs directly in cantrip configs.
+    Supports formats:
+      "anthropic/claude-sonnet-4-6"    → provider=anthropic, model=claude-sonnet-4-6
+      "openrouter/google/gemini-3-flash" → provider=openrouter, model=google/gemini-3-flash
+      "claude-haiku-4-5"               → auto-detect provider from model name
+
+    Falls back to parent_agent if resolution fails.
+    """
+    parts = model_id.split("/", 1)
+    if len(parts) == 2:
+        provider, model = parts
+    else:
+        model = model_id
+        # Auto-detect provider from model name
+        if "claude" in model.lower():
+            provider = "anthropic"
+        elif "gpt" in model.lower() or "o1" in model.lower():
+            provider = "openai"
+        else:
+            provider = "openrouter"
+
+    resolved = _resolve_from_config({"provider": provider, "model": model})
+    if resolved:
+        client, model_name, prov, base_url, api_key, api_mode = resolved
+        return Crystal(
+            tier=CrystalTier.WORKER,
+            client=client,
+            model=model_name,
+            provider=prov,
+            base_url=base_url,
+            api_key=api_key,
+            api_mode=api_mode,
+        )
+
+    # Fallback to parent agent
+    if parent_agent:
+        return Crystal(
+            tier=CrystalTier.WORKER,
+            client=getattr(parent_agent, "client", None),
+            model=model_id,
+            provider=getattr(parent_agent, "provider", "") or "",
+            base_url=getattr(parent_agent, "base_url", "") or "",
+            api_key=getattr(parent_agent, "api_key", "") or "",
+        )
+
+    logger.warning("Could not resolve model ID: %s", model_id)
+    return Crystal(
+        tier=CrystalTier.WORKER,
+        client=None,
+        model=model_id,
+        provider="unknown",
+        base_url="",
+        api_key="",
+    )
