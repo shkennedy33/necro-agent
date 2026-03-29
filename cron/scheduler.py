@@ -292,6 +292,10 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         if origin.get("chat_name"):
             os.environ["HERMES_SESSION_CHAT_NAME"] = origin["chat_name"]
 
+    # Set cwd to home directory so context_files_prompt doesn't load
+    # dev documentation (AGENTS.md, CLAUDE.md) from the repo checkout.
+    os.environ["TERMINAL_CWD"] = str(Path.home())
+
     try:
         # Re-read .env and config.yaml fresh every run so provider/key
         # changes take effect without a gateway restart.
