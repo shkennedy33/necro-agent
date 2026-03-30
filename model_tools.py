@@ -169,12 +169,16 @@ def _discover_tools():
 
 _discover_tools()
 
-# MCP tool discovery (external MCP servers from config)
+# MCP lazy loading: register a lightweight mcp_servers tool instead of
+# connecting to all MCP servers upfront.  This saves ~6,000+ tokens per
+# API call by not sending all MCP tool schemas until actually needed.
+# The model calls mcp_servers(action="load", server="blender") to activate
+# a specific server, which then registers that server's tools dynamically.
 try:
-    from tools.mcp_tool import discover_mcp_tools
-    discover_mcp_tools()
+    from tools.mcp_tool import register_mcp_loader_tool
+    register_mcp_loader_tool()
 except Exception as e:
-    logger.debug("MCP tool discovery failed: %s", e)
+    logger.debug("MCP lazy loader registration failed: %s", e)
 
 # Plugin tool discovery (user/project/pip plugins)
 try:

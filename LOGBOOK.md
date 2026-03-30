@@ -1,5 +1,103 @@
 # Necronomichat v2 — Logbook
 
+## 2026-03-30 — Token efficiency fixes (audit + implementation)
+
+### MCP Lazy Loading (biggest single win: ~6,000 tokens/call)
+Replaced unconditional MCP tool discovery with lazy loading. Previously all 62 MCP tools
+(Obsidian, Playwright, Blender) were registered at startup and sent every API call.
+
+**How it works now:**
+- `model_tools.py` calls `register_mcp_loader_tool()` instead of `discover_mcp_tools()`
+- A single `mcp_servers` tool (~100 tokens) is registered with actions: list, load
+- Model calls `mcp_servers(action="load", server="blender")` to activate a server
+- `activate_mcp_server()` connects and registers that server's tools dynamically
+- `_mcp_tools_dirty` flag signals `_execute_tool_calls` to refresh tool surface
+- `_refresh_tools_if_needed()` on AIAgent rebuilds `self.tools` and `self.valid_tool_names`
+
+**Files changed:**
+- `tools/mcp_tool.py` — added `get_configured_servers()`, `activate_mcp_server()`,
+  `check_and_clear_mcp_dirty()`, `register_mcp_loader_tool()`
+- `model_tools.py` — swapped `discover_mcp_tools()` for `register_mcp_loader_tool()`
+- `run_agent.py` — added `_refresh_tools_if_needed()`, wired into `_execute_tool_calls` finally block,
+  added to bridge constructor
+- `nchat/loop.py` — added `refresh_tools_if_needed` field to AgentBridge (with default)
+- `toolsets.py` — added `mcp_servers` to `_HERMES_CORE_TOOLS`
+
+### Other token efficiency fixes applied
+- **Fold/compaction double-fire fixed** — `continue` after successful fold in code medium
+- **Reasoning tokens stripped** — only last 3 assistant messages keep `reasoning_content`
+- **Iteration-limit summary** — messages truncated to 1K chars, reasoning stripped before summarizer
+- **Tool result caps reduced** — 100K→30K chars, terminal 50K→20K
+- **Compaction serializer tightened** — 3K→800 chars/msg, summary output capped at 6K tokens,
+  previous summary truncated to 2K chars
+- **Honcho turn context bug fixed** — injected into `_build_loop_api_messages()`
+- **System prompt trimmed** — removed redundant Active Gates list (~200 tokens),
+  stripped skills behavioral preamble in compact mode (~80 tokens)
+- **Dead code removed** — unreachable loom recording, compact review, dead budget warning branch
+
+---
+
+## 2026-03-30 — Full token efficiency audit
+
+### Summary
+Comprehensive audit of token waste across the entire codebase. Full report: `AUDIT-2026-03-30.md`
+
+### Top findings (by impact)
+1. **MCP tools unconditionally registered** (~6,200 tokens/call) — all 62 tools from Obsidian/Playwright/Blender sent every turn
+2. **Fold + compaction double-fire** in code medium — two auxiliary LLM calls covering overlapping ranges on the same turn
+3. **Reasoning tokens compound across turns** — `reasoning_content` re-sent every turn, grows quadratically
+4. **Iteration-limit summary** sends full conversation to summarizer up to 4x
+5. **Tool result caps too generous** — 100K chars (~25K tokens) per result, terminal 50K chars
+6. **Compaction serializer too generous** — 3K chars/msg vs fold's 400 chars
+7. **Honcho turn context silently dropped in compact mode** — `_build_loop_api_messages()` missing injection (correctness bug)
+
+### Dead code identified
+- `fold_conversation_context()` and `_CONVERSATION_FOLD_PROMPT_TEMPLATE` (conversation folding disabled)
+- Lines 8262-8332 in run_agent.py (loom recording + compact review in old loop post-section, unreachable)
+- `_total_tool_calls_this_turn` attribute (referenced but never set)
+- `_handle_max_iterations()` unreachable in compact mode
+- Compact branch of `_get_budget_warning()` (always called with count=0)
+
+### Frankenstein seams
+- Auth-refresh logic (Codex/Nous/Anthropic 401 retry) missing from compact mode's `_make_loop_api_call()`
+- Codex ack continuation logic missing from `run_cast()`
+- Sequential tool dispatch duplicates `_invoke_tool()` logic
+- Skills preamble behavioral guidance fires in compact mode (should be stripped)
+
+---
+
+## 2026-03-29 — Fix: bot dropping out of loop (token budget metric)
+
+### Problem
+Bot consistently hit the 800K token budget after ~13-15 turns, terminating mid-task. Every single
+interactive Telegram cast was dying with "Token budget exceeded." The bot would say "I've done X,
+now I'll do Y" but never continue to Y because the loop terminated.
+
+### Root cause
+Token budget tracked `sum(all prompt_tokens) + sum(all completion_tokens)` — cumulative across turns.
+Since each turn re-sends the system prompt + tools (~50K tokens), 15 turns × 53K = 795K cumulative
+just from prompt tokens alone. The metric was counting the same system prompt 15 times.
+
+### Fix
+Changed metric to `max(prompt_tokens per turn) + sum(completion_tokens)`:
+- **Peak prompt**: captures the actual context window pressure (grows as history grows)
+- **Cumulative completion**: captures actual generation cost
+- Applied to both conversation and code medium loops
+- Also fixed folding trigger to use per-turn prompt tokens instead of cumulative
+
+With the new metric, 800K budget allows ~250+ turns worth of completion tokens before hitting the
+limit (since peak prompt is ~55K, leaving 745K for completions at ~2-3K per turn).
+
+### Files changed
+- `nchat/loop.py`: Budget check, fold trigger, code medium budget check + warning
+- `nchat/wards.py`: Updated MaxTokens docstring
+
+### Telegram "thread not found" errors
+Older "Message thread not found" errors (March 28 01:07-01:53) were from forum topic threading.
+Already handled by the `_thread_platforms` guard at gateway/run.py:4831. Not actively recurring.
+
+---
+
 ## 2026-03-28 — Token audit: auxiliary model routing + cost optimization
 
 ### Audit findings

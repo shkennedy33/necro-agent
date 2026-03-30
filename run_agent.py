@@ -2695,13 +2695,37 @@ class AIAgent:
         use by the nchat run_cast() loop.
         """
         api_messages = []
-        for msg in messages:
+        # Only keep reasoning_content for the last 3 assistant messages.
+        # Older reasoning compounds quadratically and is not needed for
+        # multi-turn continuity — the model's own context carries forward.
+        assistant_indices = [
+            i for i, m in enumerate(messages) if m.get("role") == "assistant"
+        ]
+        keep_reasoning_from = set(assistant_indices[-3:]) if assistant_indices else set()
+
+        # Find the last user message index for Honcho turn context injection
+        last_user_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                last_user_idx = i
+                break
+
+        for idx, msg in enumerate(messages):
             api_msg = msg.copy()
 
-            # Pass reasoning back to the API for multi-turn continuity
+            # Inject Honcho turn context into the current-turn user message
+            # (mirrors the injection at run_agent.py:6767 in the old loop)
+            if (idx == last_user_idx and msg.get("role") == "user"
+                    and getattr(self, '_honcho_turn_context', None)):
+                api_msg["content"] = _inject_honcho_turn_context(
+                    api_msg.get("content", ""), self._honcho_turn_context
+                )
+
+            # Pass reasoning back to the API for multi-turn continuity,
+            # but only for recent turns to prevent quadratic token growth
             if msg.get("role") == "assistant":
                 reasoning_text = msg.get("reasoning")
-                if reasoning_text:
+                if reasoning_text and idx in keep_reasoning_from:
                     api_msg["reasoning_content"] = reasoning_text
 
             # Remove internal-only fields
@@ -2745,6 +2769,33 @@ class AIAgent:
 
         return api_messages
 
+    def _refresh_tools_if_needed(self) -> bool:
+        """Check if MCP tools were dynamically loaded and refresh tool surface.
+
+        Called after tool execution to pick up newly registered MCP tools.
+        Returns True if tools were refreshed.
+        """
+        try:
+            from tools.mcp_tool import check_and_clear_mcp_dirty
+            if not check_and_clear_mcp_dirty():
+                return False
+        except ImportError:
+            return False
+
+        # Rebuild tool definitions from registry (now includes new MCP tools)
+        self.tools = get_tool_definitions(
+            quiet_mode=True,
+            compact=self._compact_mode,
+        )
+        self.valid_tool_names = {
+            tool["function"]["name"] for tool in self.tools
+        } if self.tools else set()
+
+        new_count = len(self.tools)
+        if not self.quiet_mode:
+            print(f"🔌 MCP tools loaded — tool surface refreshed ({new_count} tools)")
+        return True
+
     def _build_agent_bridge(self, effective_task_id: str) -> "AgentBridge":
         """Construct an AgentBridge from self for run_cast().
 
@@ -2770,6 +2821,7 @@ class AIAgent:
             strip_think_blocks=self._strip_think_blocks,
             has_content_after_think=self._has_content_after_think_block,
             repair_tool_call=self._repair_tool_call,
+            refresh_tools_if_needed=self._refresh_tools_if_needed,
             iteration_budget=self.iteration_budget,
             context_compressor=self.context_compressor,
             compression_enabled=self.compression_enabled,
@@ -3002,6 +3054,7 @@ class AIAgent:
             skills_index = build_skills_system_prompt(
                 available_tools=self.valid_tool_names,
                 available_toolsets=avail_toolsets,
+                compact=True,
             ) or None
 
         # Context files (AGENTS.md etc.)
@@ -5662,6 +5715,10 @@ class AIAgent:
             )
         finally:
             self._executing_tools = False
+            # Check if MCP tools were dynamically loaded during this batch.
+            # Refresh tool surface so the next API call includes new tools.
+            # (Called in both compact and verbose paths via this shared method.)
+            self._refresh_tools_if_needed()
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str) -> str:
         """Invoke a single tool and return the result string. No display logic.
@@ -5881,7 +5938,7 @@ class AIAgent:
                     print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s - {response_preview}")
 
             # Truncate oversized results
-            MAX_TOOL_RESULT_CHARS = 100_000
+            MAX_TOOL_RESULT_CHARS = 30_000
             if len(function_result) > MAX_TOOL_RESULT_CHARS:
                 original_len = len(function_result)
                 function_result = (
@@ -6138,7 +6195,7 @@ class AIAgent:
             # blow up the context window. 100K chars ≈ 25K tokens — generous
             # enough for any reasonable tool output but prevents catastrophic
             # context explosions (e.g. accidental base64 image dumps).
-            MAX_TOOL_RESULT_CHARS = 100_000
+            MAX_TOOL_RESULT_CHARS = 30_000
             if len(function_result) > MAX_TOOL_RESULT_CHARS:
                 original_len = len(function_result)
                 function_result = (
@@ -6208,14 +6265,9 @@ class AIAgent:
         if not self._budget_pressure_enabled or self.max_iterations <= 0:
             return None
 
-        # Compact mode: single ward-style message at 80%
+        # Compact mode: budget warnings are handled by circle.should_warn()
+        # in nchat/loop.py. This method is only effective in verbose mode.
         if self._compact_mode:
-            if self.max_iterations <= 20:
-                return None  # Too short for warnings
-            warn_at = int(self.max_iterations * 0.8)
-            if api_call_count == warn_at:
-                remaining = self.max_iterations - api_call_count
-                return f"[Ward: {remaining} turns remaining. Consolidate.]"
             return None
 
         # Verbose mode: original two-tier system
@@ -6286,13 +6338,19 @@ class AIAgent:
 
         try:
             # Build API messages, stripping internal-only fields
-            # (finish_reason, reasoning) that strict APIs like Mistral reject with 422
+            # (finish_reason, reasoning) that strict APIs like Mistral reject with 422.
+            # Also truncate message content to avoid sending 100K+ tokens to the
+            # summarizer — it only needs the gist of each turn.
             _is_strict_api = "api.mistral.ai" in self._base_url_lower
             api_messages = []
             for msg in messages:
                 api_msg = msg.copy()
-                for internal_field in ("reasoning", "finish_reason"):
+                for internal_field in ("reasoning", "finish_reason", "reasoning_content"):
                     api_msg.pop(internal_field, None)
+                # Truncate message content for summary — summarizer needs gist, not full text
+                content = api_msg.get("content")
+                if isinstance(content, str) and len(content) > 1000:
+                    api_msg["content"] = content[:800] + "\n...[truncated for summary]...\n" + content[-150:]
                 if _is_strict_api:
                     self._sanitize_tool_calls_for_strict_api(api_msg)
                 api_messages.append(api_msg)
@@ -8258,38 +8316,9 @@ class AIAgent:
         }
         self._response_was_previewed = False
 
-        # Record session summary to loom
-        if self._loom and self._compact_mode:
-            try:
-                from nchat.loom import Turn, GateCallRecord
-                import time as _time
-                # Record a summary turn capturing the full session stats
-                gate_calls = []
-                for msg in messages:
-                    if msg.get("role") == "assistant":
-                        for tc in msg.get("tool_calls") or []:
-                            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-                            gate_calls.append(GateCallRecord(
-                                name=fn.get("name", "?"),
-                                arguments=fn.get("arguments", "")[:100],
-                            ))
-                status = "interrupted" if interrupted else ("terminated" if completed else "truncated")
-                self._loom.record(Turn(
-                    id=f"{self.session_id}-{api_call_count}",
-                    entity_id=self.session_id,
-                    sequence=api_call_count,
-                    crystal_tier="primary",
-                    utterance=(final_response or "")[:500],
-                    observation=f"turns={api_call_count}, tools={len(gate_calls)}",
-                    gate_calls=gate_calls,
-                    tokens_prompt=self.session_input_tokens,
-                    tokens_completion=self.session_output_tokens,
-                    duration_ms=0,
-                    status=status,
-                    timestamp=_time.time(),
-                ))
-            except Exception as e:
-                logger.debug("Loom recording failed (non-fatal): %s", e)
+        # NOTE: Loom recording for compact mode happens inside _run_via_cast()
+        # (per-turn recording in nchat/loop.py). This post-loop section is only
+        # reached by the verbose loop, which doesn't use loom.
 
         # Include interrupt message if one triggered the interrupt
         if interrupted and self._interrupt_message:
@@ -8313,24 +8342,8 @@ class AIAgent:
 
         # Background memory/skill review — runs AFTER the response is delivered
         # so it never competes with the user's task for model attention.
-        #
-        # In compact mode, the PostCastReview ward controls this with
-        # min_turns/min_tool_calls thresholds instead of nudge intervals.
-        if self._compact_mode and final_response and not interrupted:
-            try:
-                from nchat.wards import load_circle_from_config
-                circle = load_circle_from_config()
-                tool_call_count = getattr(self, '_total_tool_calls_this_turn', 0)
-                if circle.should_review(api_call_count, tool_call_count):
-                    review = circle.post_cast_review
-                    self._spawn_background_review(
-                        messages_snapshot=list(messages),
-                        review_memory=review.review_memory,
-                        review_skills=review.review_skills,
-                    )
-            except Exception:
-                pass  # Post-cast review is best-effort
-        elif final_response and not interrupted and (_should_review_memory or _should_review_skills):
+        # NOTE: compact mode review happens inside _run_via_cast(), not here.
+        if final_response and not interrupted and (_should_review_memory or _should_review_skills):
             try:
                 self._spawn_background_review(
                     messages_snapshot=list(messages),

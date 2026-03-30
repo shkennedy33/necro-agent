@@ -142,6 +142,10 @@ class AgentBridge:
     quiet_mode: bool
     task_id: str
 
+    # ── Dynamic tool surface (MCP lazy loading) ──
+    # () → bool  — check if MCP tools were loaded; refresh agent tool surface
+    refresh_tools_if_needed: Callable[[], bool] = lambda: False
+
 
 # ── The loop ──────────────────────────────────────────────────────────
 
@@ -191,6 +195,7 @@ def run_cast(
     tool_calls_total = 0
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    peak_prompt_tokens = 0  # Highest single-turn prompt token count
     start_time = time.monotonic()
     fold_count = 0
 
@@ -294,14 +299,23 @@ def run_cast(
 
         total_prompt_tokens += turn_prompt_tokens
         total_completion_tokens += turn_completion_tokens
+        if turn_prompt_tokens > peak_prompt_tokens:
+            peak_prompt_tokens = turn_prompt_tokens
 
         # ── Token budget check ──────────────────────────────────────
-        total_tokens = total_prompt_tokens + total_completion_tokens
-        if circle.token_budget_exceeded(total_tokens, is_code_medium=False):
+        # Use peak prompt (not cumulative) + cumulative completion.
+        # Cumulative prompt double-counts the system prompt and tools
+        # on every turn, which inflates the metric ~15x.  Peak prompt
+        # reflects the actual context window cost; cumulative completion
+        # reflects the actual generation cost.
+        effective_tokens = peak_prompt_tokens + total_completion_tokens
+        if circle.token_budget_exceeded(effective_tokens, is_code_medium=False):
             logger.warning(
-                "Token budget exceeded in conversation cast: %d tokens "
-                "(limit %d). Terminating.",
-                total_tokens, circle.max_tokens.limit,
+                "Token budget exceeded in conversation cast: "
+                "effective=%d (peak_prompt=%d + total_completion=%d), "
+                "limit=%d. Terminating.",
+                effective_tokens, peak_prompt_tokens,
+                total_completion_tokens, circle.max_tokens.limit,
             )
             break
 
@@ -540,6 +554,8 @@ def run_cast(
             bridge.execute_tools(
                 assistant_message, messages, bridge.task_id, 0,
             )
+            # NOTE: MCP lazy-load refresh happens inside _execute_tool_calls
+            # (via the finally block), so no explicit call needed here.
         else:
             # Standalone mode — empty results
             for tc in assistant_message.tool_calls:
@@ -559,25 +575,16 @@ def run_cast(
             turn_duration_ms, "running",
         )
 
-        # ── 11. Context folding + compression fallback ─────────────────
-        total_tokens = total_prompt_tokens + total_completion_tokens
-        if should_fold(
-            turn_count, len(messages), total_tokens, fold_count,
-            min_turns_before_fold=10,   # conversation turns are lighter
-            token_threshold=120_000,    # slightly higher than code medium
-            message_threshold=30,       # conversation has more messages per turn
-        ):
-            messages, did_fold = fold_conversation_context(
-                messages,
-                protect_last_n=10,  # ~5 recent tool turns
-                protect_first_n=2,
-                current_turn=turn_count,
-            )
-            if did_fold:
-                fold_count += 1
-                logger.info("Conversation fold #%d at turn %d", fold_count, turn_count)
+        # ── 11. Compression fallback ─────────────────────────────────────
+        # Conversation-mode folding is DISABLED. Folding replaces tool
+        # results with lossy summaries, which destroys file paths, variable
+        # names, and intermediate outputs that multi-step tasks depend on.
+        # Instead, let the reactive compaction system handle context overflow
+        # when the API actually refuses the payload (ContextOverflowError).
+        # Code medium folding (in _run_code_cast) is still active because
+        # sandbox state persists independently of the prompt.
 
-        # Fallback: compaction if folding wasn't enough
+        # Compaction: reactively compress if context is getting large
         if bridge and bridge.compression_enabled:
             compressor = bridge.context_compressor
             new_tool_msgs = messages[msg_count_before:]
@@ -652,6 +659,7 @@ def _run_code_cast(
     tool_calls_total = 0
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    peak_prompt_tokens = 0
     start_time = time.monotonic()
     token_warning_sent = False
     fold_count = 0
@@ -740,23 +748,27 @@ def _run_code_cast(
 
         total_prompt_tokens += turn_prompt_tokens
         total_completion_tokens += turn_completion_tokens
+        if turn_prompt_tokens > peak_prompt_tokens:
+            peak_prompt_tokens = turn_prompt_tokens
 
         # Per-turn cost logging
-        total_tokens = total_prompt_tokens + total_completion_tokens
+        effective_tokens = peak_prompt_tokens + total_completion_tokens
         logger.info(
             "Code cast turn %d/%d: +%d prompt, +%d completion. "
-            "Cumulative: %d tokens (%d prompt + %d completion)",
+            "Effective: %d (peak_prompt=%d + total_completion=%d)",
             turn_count, max_turns,
             turn_prompt_tokens, turn_completion_tokens,
-            total_tokens, total_prompt_tokens, total_completion_tokens,
+            effective_tokens, peak_prompt_tokens, total_completion_tokens,
         )
 
         # ── Token budget check ──────────────────────────────────────
-        if circle.token_budget_exceeded(total_tokens, is_code_medium=True):
+        if circle.token_budget_exceeded(effective_tokens, is_code_medium=True):
             logger.warning(
-                "Token budget exceeded in code cast: %d tokens "
-                "(limit %d). Terminating.",
-                total_tokens, circle.max_tokens.code_medium_limit,
+                "Token budget exceeded in code cast: "
+                "effective=%d (peak_prompt=%d + total_completion=%d), "
+                "limit=%d. Terminating.",
+                effective_tokens, peak_prompt_tokens,
+                total_completion_tokens, circle.max_tokens.code_medium_limit,
             )
             break
 
@@ -856,16 +868,16 @@ def _run_code_cast(
 
         # Token-based warning (fires once at 80% of token budget)
         if not token_warning_sent:
-            total_tokens = total_prompt_tokens + total_completion_tokens
+            effective_tokens = peak_prompt_tokens + total_completion_tokens
             warn_at = circle.token_budget_warning_threshold(is_code_medium=True)
-            if total_tokens >= warn_at:
+            if effective_tokens >= warn_at:
                 token_warning_sent = True
-                remaining_tokens = circle.max_tokens.code_medium_limit - total_tokens
+                remaining_tokens = circle.max_tokens.code_medium_limit - effective_tokens
                 messages.append({
                     "role": "system",
                     "content": (
                         f"[Ward: Token budget at 80%. ~{remaining_tokens:,} tokens remaining. "
-                        f"You have used {total_tokens:,} tokens across {turn_count} turns. "
+                        f"You have used {effective_tokens:,} effective tokens across {turn_count} turns. "
                         f"Wrap up and call submit_answer() soon.]"
                     ),
                 })
@@ -874,9 +886,8 @@ def _run_code_cast(
         # Folding (spec §6.8): integrate old turns into sandbox state.
         # Unlike compaction, sandbox variables persist — folded knowledge
         # isn't lost, it's just removed from the prompt.
-        total_tokens = total_prompt_tokens + total_completion_tokens
         if should_fold(
-            turn_count, len(messages), total_tokens, fold_count,
+            turn_count, len(messages), turn_prompt_tokens, fold_count,
         ):
             sandbox_vars = medium.introspect_sandbox()
             messages, did_fold = fold_code_context(
@@ -888,8 +899,11 @@ def _run_code_cast(
             if did_fold:
                 fold_count += 1
                 logger.info("Fold #%d complete at turn %d", fold_count, turn_count)
+                # Skip compaction this turn — folding already relieved context
+                # pressure and the two systems cover overlapping ranges.
+                continue
 
-        # Fallback: if folding wasn't enough, use compaction
+        # Fallback: compaction only fires if folding didn't run or wasn't enough
         if bridge and bridge.compression_enabled:
             compressor = bridge.context_compressor
             estimated_next = (

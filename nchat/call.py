@@ -123,13 +123,9 @@ def build_capability_presentation(
         env_lines.append(f"Model: {model}")
     sections.append("## Environment\n\n" + "\n".join(env_lines))
 
-    # Active gates — just names and one-liners
-    if gate_names:
-        gate_lines = ["You have access to the following tools. Use them as needed.\n"]
-        for name in sorted(gate_names):
-            desc = gate_descriptions.get(name, "")
-            gate_lines.append(f"- {name}: {desc}" if desc else f"- {name}")
-        sections.append("## Active Gates\n\n" + "\n".join(gate_lines))
+    # Active gates list removed — the model already receives tool definitions
+    # via the API's `tools` parameter. Listing them again in the system prompt
+    # is redundant (~200 tokens saved per call).
 
     # Memory (only if entries exist)
     if memory_snapshot:
