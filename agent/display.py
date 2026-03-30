@@ -107,7 +107,7 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int = 40) -> str | N
         "vision_analyze": "question", "mixture_of_agents": "user_prompt",
         "skill_view": "name", "skills_list": "category",
         "cronjob": "action",
-        "execute_code": "code", "delegate_task": "goal",
+        "execute_code": "code", "execute": "code", "delegate_task": "goal",
         "clarify": "question", "skill_manage": "name",
     }
 

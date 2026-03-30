@@ -123,13 +123,9 @@ def build_capability_presentation(
         env_lines.append(f"Model: {model}")
     sections.append("## Environment\n\n" + "\n".join(env_lines))
 
-    # Active gates — just names and one-liners
-    if gate_names:
-        gate_lines = ["You have access to the following tools. Use them as needed.\n"]
-        for name in sorted(gate_names):
-            desc = gate_descriptions.get(name, "")
-            gate_lines.append(f"- {name}: {desc}" if desc else f"- {name}")
-        sections.append("## Active Gates\n\n" + "\n".join(gate_lines))
+    # Active gates list removed — the model already receives tool definitions
+    # via the API's `tools` parameter. Listing them again in the system prompt
+    # is redundant (~200 tokens saved per call).
 
     # Memory (only if entries exist)
     if memory_snapshot:
@@ -169,30 +165,48 @@ def build_system_prompt_compact(
     system_message: str | None = None,
     honcho_block: str | None = None,
     context_files_prompt: str | None = None,
+    medium_capability_text: str | None = None,
 ) -> str:
     """Assemble the full compact system prompt.
 
     Identity (call) + capability presentation (circle-derived).
     No behavioral guidance. No "do NOT" instructions.
+
+    When medium_capability_text is provided (code medium mode), it replaces
+    the standard capability presentation with the medium documentation block.
+    This is ~400 tokens of medium docs + ~200 tokens of gate signatures
+    instead of ~3,300 tokens of tool schemas.
     """
     parts = [build_call(soul_path)]
 
     if system_message:
         parts.append(system_message)
 
-    cap = build_capability_presentation(
-        gate_names=gate_names or [],
-        gate_descriptions=gate_descriptions or {},
-        memory_snapshot=memory_snapshot,
-        user_profile=user_profile,
-        skills_index=skills_index,
-        session_id=session_id,
-        model=model,
-        platform=platform,
-        honcho_block=honcho_block,
-    )
-    if cap:
-        parts.append(cap)
+    if medium_capability_text:
+        # Code medium: use medium documentation instead of tool listing
+        parts.append(medium_capability_text)
+        # Still include memory/user profile/skills if present
+        if memory_snapshot:
+            parts.append(f"## Memory\n\n{memory_snapshot}")
+        if user_profile:
+            parts.append(f"## User Profile\n\n{user_profile}")
+        if skills_index:
+            parts.append(f"## Skills\n\n{skills_index}")
+    else:
+        # Conversation medium: standard capability presentation
+        cap = build_capability_presentation(
+            gate_names=gate_names or [],
+            gate_descriptions=gate_descriptions or {},
+            memory_snapshot=memory_snapshot,
+            user_profile=user_profile,
+            skills_index=skills_index,
+            session_id=session_id,
+            model=model,
+            platform=platform,
+            honcho_block=honcho_block,
+        )
+        if cap:
+            parts.append(cap)
 
     # Context files (AGENTS.md etc.) — still included if present
     if context_files_prompt:

@@ -5,6 +5,10 @@ run_conversation() for compact mode. It accesses AIAgent infrastructure
 through an AgentBridge — a typed interface that documents exactly what the
 loop needs without coupling it to the 7,800-line AIAgent class.
 
+Supports two mediums:
+  - Conversation (default): entity uses tool_calls, tools are OpenAI schemas
+  - Code (Phase 7): entity writes programs, gates are host functions in sandbox
+
 Design principles (from cantrip spec):
   - Strict alternation: utterance, observation, utterance, observation
   - Errors are observations, not failures
@@ -23,6 +27,7 @@ from uuid import uuid4
 from nchat.crystals import Crystal
 from nchat.wards import Circle
 from nchat.loom import Loom, Turn, GateCallRecord
+from nchat.fold import fold_code_context, fold_conversation_context, should_fold
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +142,10 @@ class AgentBridge:
     quiet_mode: bool
     task_id: str
 
+    # ── Dynamic tool surface (MCP lazy loading) ──
+    # () → bool  — check if MCP tools were loaded; refresh agent tool surface
+    refresh_tools_if_needed: Callable[[], bool] = lambda: False
+
 
 # ── The loop ──────────────────────────────────────────────────────────
 
@@ -149,6 +158,7 @@ def run_cast(
     entity_id: str | None = None,
     loom: Loom | None = None,
     bridge: AgentBridge | None = None,
+    medium: Any = None,
 ) -> CastResult:
     """Run the agent loop.
 
@@ -162,11 +172,20 @@ def run_cast(
         loom: Loom for per-turn recording. Optional.
         bridge: AgentBridge for AIAgent infrastructure. When None,
                 the loop runs in standalone mode (for testing).
+        medium: CodeMedium instance for code mode. None = conversation mode.
 
     Returns:
         CastResult with the final response, status, and metadata.
     """
     entity_id = entity_id or str(uuid4())
+
+    # Route to code medium path if medium is set
+    if medium is not None:
+        return _run_code_cast(
+            crystal, call, circle, medium, intent, history,
+            entity_id, loom, bridge,
+        )
+
     messages = list(history)
     # Intent was already appended by the caller (run_conversation setup)
     # so we don't append it here.
@@ -176,7 +195,9 @@ def run_cast(
     tool_calls_total = 0
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    peak_prompt_tokens = 0  # Highest single-turn prompt token count
     start_time = time.monotonic()
+    fold_count = 0
 
     # Content-with-tools fallback: when the model delivers its answer
     # alongside tool calls (e.g. "Here's your answer" + memory save),
@@ -278,6 +299,25 @@ def run_cast(
 
         total_prompt_tokens += turn_prompt_tokens
         total_completion_tokens += turn_completion_tokens
+        if turn_prompt_tokens > peak_prompt_tokens:
+            peak_prompt_tokens = turn_prompt_tokens
+
+        # ── Token budget check ──────────────────────────────────────
+        # Use peak prompt (not cumulative) + cumulative completion.
+        # Cumulative prompt double-counts the system prompt and tools
+        # on every turn, which inflates the metric ~15x.  Peak prompt
+        # reflects the actual context window cost; cumulative completion
+        # reflects the actual generation cost.
+        effective_tokens = peak_prompt_tokens + total_completion_tokens
+        if circle.token_budget_exceeded(effective_tokens, is_code_medium=False):
+            logger.warning(
+                "Token budget exceeded in conversation cast: "
+                "effective=%d (peak_prompt=%d + total_completion=%d), "
+                "limit=%d. Terminating.",
+                effective_tokens, peak_prompt_tokens,
+                total_completion_tokens, circle.max_tokens.limit,
+            )
+            break
 
         # ── 5. Normalize response ─────────────────────────────────────
         if bridge:
@@ -514,6 +554,8 @@ def run_cast(
             bridge.execute_tools(
                 assistant_message, messages, bridge.task_id, 0,
             )
+            # NOTE: MCP lazy-load refresh happens inside _execute_tool_calls
+            # (via the finally block), so no explicit call needed here.
         else:
             # Standalone mode — empty results
             for tc in assistant_message.tool_calls:
@@ -533,7 +575,16 @@ def run_cast(
             turn_duration_ms, "running",
         )
 
-        # ── 11. Context pressure — compress if needed ─────────────────
+        # ── 11. Compression fallback ─────────────────────────────────────
+        # Conversation-mode folding is DISABLED. Folding replaces tool
+        # results with lossy summaries, which destroys file paths, variable
+        # names, and intermediate outputs that multi-step tasks depend on.
+        # Instead, let the reactive compaction system handle context overflow
+        # when the API actually refuses the payload (ContextOverflowError).
+        # Code medium folding (in _run_code_cast) is still active because
+        # sandbox state persists independently of the prompt.
+
+        # Compaction: reactively compress if context is getting large
         if bridge and bridge.compression_enabled:
             compressor = bridge.context_compressor
             new_tool_msgs = messages[msg_count_before:]
@@ -577,6 +628,404 @@ def run_cast(
         tool_calls_total, total_prompt_tokens,
         total_completion_tokens, start_time,
     )
+
+
+# ── Code medium cast ──────────────────────────────────────────────────
+
+def _run_code_cast(
+    crystal: Crystal,
+    call: str,
+    circle: Circle,
+    medium: Any,  # CodeMedium
+    intent: str,
+    history: List[Dict],
+    entity_id: str,
+    loom: Loom | None = None,
+    bridge: AgentBridge | None = None,
+) -> CastResult:
+    """Code medium cast — entity writes programs, gates are host functions.
+
+    The entity is given ONE tool (execute) and tool_choice is set to require it.
+    Each turn: model writes code → sandbox executes → viewport observation returned.
+    The loop continues until submit_answer() is called or max_turns is reached.
+    """
+    messages = list(history)
+    if intent:
+        messages.append({"role": "user", "content": intent})
+
+    # Code medium uses its own (lower) turn limit
+    max_turns = circle.code_medium_max_turns
+    turn_count = 0
+    tool_calls_total = 0
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    peak_prompt_tokens = 0
+    start_time = time.monotonic()
+    token_warning_sent = False
+    fold_count = 0
+
+    # System prompt: identity + medium documentation
+    active_system_prompt = call
+
+    # The single tool schema
+    tools = [medium.execute_tool_schema()]
+
+    # Ensure sandbox is running
+    try:
+        medium.start()
+    except Exception as e:
+        return _build_result(
+            messages, entity_id, "failed", 0, 0, 0, 0, start_time,
+            error=f"Sandbox failed to start: {e}",
+        )
+
+    # Compression state
+    compression_attempts = 0
+    max_compression_attempts = 3
+
+    while turn_count < max_turns:
+        # ── 1. Interrupt check ────────────────────────────────────────
+        if bridge and bridge.is_interrupted():
+            return _build_result(
+                messages, entity_id, "interrupted", turn_count,
+                tool_calls_total, total_prompt_tokens,
+                total_completion_tokens, start_time,
+            )
+
+        turn_count += 1
+        turn_start = time.monotonic()
+
+        # ── 2. Build API messages ─────────────────────────────────────
+        if bridge:
+            api_messages = bridge.build_api_messages(
+                active_system_prompt, messages,
+            )
+        else:
+            api_messages = (
+                [{"role": "system", "content": active_system_prompt}]
+                + messages
+            )
+
+        # ── 3. Query the crystal ──────────────────────────────────────
+        turn_prompt_tokens = 0
+        turn_completion_tokens = 0
+
+        try:
+            response, usage_dict = _query_crystal_direct(
+                crystal, api_messages, tools,
+            )
+            turn_prompt_tokens = usage_dict.get("prompt_tokens", 0)
+            turn_completion_tokens = usage_dict.get("completion_tokens", 0)
+
+        except ContextOverflowError:
+            if bridge and bridge.compression_enabled:
+                compression_attempts += 1
+                if compression_attempts > max_compression_attempts:
+                    break
+                approx = sum(len(str(m)) for m in api_messages) // 4
+                messages, active_system_prompt = bridge.compress_context(
+                    messages, None, approx, bridge.task_id,
+                )
+                turn_count -= 1
+                continue
+            break
+
+        except InterruptedError:
+            return _build_result(
+                messages, entity_id, "interrupted", turn_count,
+                tool_calls_total, total_prompt_tokens,
+                total_completion_tokens, start_time,
+            )
+
+        except Exception as e:
+            logger.error("Crystal query failed in code cast: %s", e)
+            return _build_result(
+                messages, entity_id, "failed", turn_count,
+                tool_calls_total, total_prompt_tokens,
+                total_completion_tokens, start_time,
+                error=str(e),
+            )
+
+        total_prompt_tokens += turn_prompt_tokens
+        total_completion_tokens += turn_completion_tokens
+        if turn_prompt_tokens > peak_prompt_tokens:
+            peak_prompt_tokens = turn_prompt_tokens
+
+        # Per-turn cost logging
+        effective_tokens = peak_prompt_tokens + total_completion_tokens
+        logger.info(
+            "Code cast turn %d/%d: +%d prompt, +%d completion. "
+            "Effective: %d (peak_prompt=%d + total_completion=%d)",
+            turn_count, max_turns,
+            turn_prompt_tokens, turn_completion_tokens,
+            effective_tokens, peak_prompt_tokens, total_completion_tokens,
+        )
+
+        # ── Token budget check ──────────────────────────────────────
+        if circle.token_budget_exceeded(effective_tokens, is_code_medium=True):
+            logger.warning(
+                "Token budget exceeded in code cast: "
+                "effective=%d (peak_prompt=%d + total_completion=%d), "
+                "limit=%d. Terminating.",
+                effective_tokens, peak_prompt_tokens,
+                total_completion_tokens, circle.max_tokens.code_medium_limit,
+            )
+            break
+
+        # ── 4. Extract code from response ─────────────────────────────
+        if not response or not response.choices:
+            break
+
+        assistant_message = response.choices[0].message
+        finish_reason = getattr(response.choices[0], "finish_reason", None) or "stop"
+        turn_duration_ms = int((time.monotonic() - turn_start) * 1000)
+
+        code = _extract_code_from_response(assistant_message)
+
+        if not code:
+            # Model produced text-only (shouldn't happen with required tool_choice).
+            # If the model has content, use it. Otherwise, extract from the last
+            # viewport — the model likely print()-ed its answer instead of calling
+            # submit_answer().
+            content = assistant_message.content or ""
+            if not content.strip():
+                content = _extract_last_viewport_answer(messages)
+            messages.append({"role": "assistant", "content": content})
+
+            _record_loom_turn(
+                loom, entity_id, turn_count, crystal, content[:500], [],
+                turn_prompt_tokens, turn_completion_tokens,
+                turn_duration_ms, "terminated",
+            )
+
+            return _build_result(
+                messages, entity_id, "terminated", turn_count,
+                tool_calls_total, total_prompt_tokens,
+                total_completion_tokens, start_time,
+                response=content,
+            )
+
+        tool_calls_total += 1
+
+        # ── 5. Build and append assistant message ─────────────────────
+        tc = assistant_message.tool_calls[0]
+        assistant_msg = {
+            "role": "assistant",
+            "content": assistant_message.content or "",
+            "tool_calls": [{
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }],
+        }
+        messages.append(assistant_msg)
+
+        # ── 6. Execute in sandbox ─────────────────────────────────────
+        observation = medium.execute(code)
+
+        # Append viewport as tool result
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tc.id,
+            "content": observation.viewport,
+        })
+
+        # ── 7. Record loom turn ───────────────────────────────────────
+        _record_loom_turn(
+            loom, entity_id, turn_count, crystal,
+            code[:500],  # utterance is the code (truncated for loom)
+            observation.gate_calls,
+            turn_prompt_tokens, turn_completion_tokens,
+            turn_duration_ms, "running",
+        )
+
+        # ── 8. Check for done (submit_answer) ─────────────────────────
+        if medium.is_done():
+            _record_loom_turn(
+                loom, entity_id, turn_count, crystal,
+                f"submit_answer: {medium.answer[:200]}",
+                observation.gate_calls,
+                0, 0, 0, "terminated",
+            )
+            return _build_result(
+                messages, entity_id, "terminated", turn_count,
+                tool_calls_total, total_prompt_tokens,
+                total_completion_tokens, start_time,
+                response=medium.answer,
+            )
+
+        # ── 9. Budget warning at threshold ────────────────────────────
+        # Turn-based warning
+        if circle.should_warn(turn_count):
+            remaining = max_turns - turn_count
+            messages.append({
+                "role": "system",
+                "content": circle.budget_warning_message(remaining),
+            })
+
+        # Token-based warning (fires once at 80% of token budget)
+        if not token_warning_sent:
+            effective_tokens = peak_prompt_tokens + total_completion_tokens
+            warn_at = circle.token_budget_warning_threshold(is_code_medium=True)
+            if effective_tokens >= warn_at:
+                token_warning_sent = True
+                remaining_tokens = circle.max_tokens.code_medium_limit - effective_tokens
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[Ward: Token budget at 80%. ~{remaining_tokens:,} tokens remaining. "
+                        f"You have used {effective_tokens:,} effective tokens across {turn_count} turns. "
+                        f"Wrap up and call submit_answer() soon.]"
+                    ),
+                })
+
+        # ── 10. Context folding ─────────────────────────────────────────
+        # Folding (spec §6.8): integrate old turns into sandbox state.
+        # Unlike compaction, sandbox variables persist — folded knowledge
+        # isn't lost, it's just removed from the prompt.
+        if should_fold(
+            turn_count, len(messages), turn_prompt_tokens, fold_count,
+        ):
+            sandbox_vars = medium.introspect_sandbox()
+            messages, did_fold = fold_code_context(
+                messages, sandbox_vars,
+                protect_last_n=6,  # ~3 recent code turns
+                protect_first_n=2,  # user intent + first response
+                current_turn=turn_count,
+            )
+            if did_fold:
+                fold_count += 1
+                logger.info("Fold #%d complete at turn %d", fold_count, turn_count)
+                # Skip compaction this turn — folding already relieved context
+                # pressure and the two systems cover overlapping ranges.
+                continue
+
+        # Fallback: compaction only fires if folding didn't run or wasn't enough
+        if bridge and bridge.compression_enabled:
+            compressor = bridge.context_compressor
+            estimated_next = (
+                compressor.last_prompt_tokens
+                + compressor.last_completion_tokens
+                + len(observation.viewport) // 3
+            )
+            if compressor.should_compress(estimated_next):
+                messages, active_system_prompt = bridge.compress_context(
+                    messages, None, compressor.last_prompt_tokens,
+                    bridge.task_id,
+                )
+
+        # ── 11. Save session log ──────────────────────────────────────
+        if bridge:
+            bridge.save_session_log(messages)
+
+    # ── Ward triggered: truncated ─────────────────────────────────────
+    # Extract answer from medium state or last viewport if no submit_answer
+    truncated_response = None
+    if medium.is_done():
+        truncated_response = medium.answer
+    else:
+        truncated_response = _extract_last_viewport_answer(messages)
+    return _build_result(
+        messages, entity_id, "truncated", turn_count,
+        tool_calls_total, total_prompt_tokens,
+        total_completion_tokens, start_time,
+        response=truncated_response,
+    )
+
+
+def _query_crystal_direct(
+    crystal: Crystal,
+    api_messages: List[Dict],
+    tools: List[Dict],
+    tool_choice: str = "required",
+) -> tuple:
+    """Direct API call for code medium. Returns (response, usage_dict).
+
+    Simpler than the bridge's query_api — no streaming, no Codex adapter,
+    no TUI display. The code medium doesn't need those.
+    """
+    if not crystal.client:
+        raise RuntimeError("Crystal has no client configured")
+
+    try:
+        kwargs: Dict[str, Any] = {
+            "model": crystal.model,
+            "messages": api_messages,
+            "tools": tools,
+        }
+        # Try tool_choice="required" (force tool use); fall back to "auto"
+        try:
+            kwargs["tool_choice"] = tool_choice
+            response = crystal.client.chat.completions.create(**kwargs)
+        except Exception as first_err:
+            if "tool_choice" in str(first_err).lower():
+                kwargs["tool_choice"] = "auto"
+                response = crystal.client.chat.completions.create(**kwargs)
+            else:
+                raise
+
+        usage = getattr(response, "usage", None)
+        usage_dict = {
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
+            "completion_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
+        }
+        return response, usage_dict
+
+    except Exception as e:
+        err_str = str(e).lower()
+        if "context_length" in err_str or "payload" in err_str or "too large" in err_str:
+            raise ContextOverflowError(str(e)) from e
+        raise
+
+
+def _extract_code_from_response(assistant_message: Any) -> Optional[str]:
+    """Extract code from the model's execute tool call."""
+    if not assistant_message.tool_calls:
+        return None
+
+    tc = assistant_message.tool_calls[0]
+    args_raw = tc.function.arguments
+
+    if isinstance(args_raw, dict):
+        return args_raw.get("code", "")
+
+    if isinstance(args_raw, str):
+        try:
+            args = json.loads(args_raw)
+            return args.get("code", "")
+        except json.JSONDecodeError:
+            # Maybe the model put the code directly as the arguments string
+            return args_raw
+
+    return None
+
+
+def _extract_last_viewport_answer(messages: List[Dict]) -> str:
+    """Extract the last meaningful console output from code medium viewports.
+
+    When the model print()-ed its answer instead of calling submit_answer(),
+    the answer is in the tool result message's "Console output:" section.
+    Walk backwards through tool results and return the first non-empty output.
+    """
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content", "")
+        if "Console output:" not in content:
+            continue
+        # Extract everything after "Console output:\n"
+        idx = content.index("Console output:")
+        output = content[idx + len("Console output:"):].strip()
+        # Strip trailing "[...N more chars]" truncation notice
+        if output.endswith("]") and "[..." in output:
+            last_bracket = output.rfind("[...")
+            output = output[:last_bracket].strip()
+        if output:
+            return output
+    return ""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────

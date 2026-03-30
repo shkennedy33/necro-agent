@@ -1855,3 +1855,193 @@ def _stop_mcp_loop():
         if thread is not None:
             thread.join(timeout=5)
         loop.close()
+
+
+# ---------------------------------------------------------------------------
+# Lazy MCP Loading  (deferred discovery — connect only when needed)
+# ---------------------------------------------------------------------------
+
+# Flag: set to True after activate_mcp_server registers new tools.
+# Consumed by run_agent.py to refresh the tool surface between turns.
+_mcp_tools_dirty = False
+
+
+def get_configured_servers() -> Dict[str, dict]:
+    """Return configured MCP servers WITHOUT connecting to them.
+
+    Returns ``{name: {transport, description, enabled}}`` for each server
+    in the config.  No network I/O — purely reads the config file.
+    """
+    if not _MCP_AVAILABLE:
+        return {}
+    servers = _load_mcp_config()
+    result = {}
+    for name, cfg in servers.items():
+        enabled = _parse_boolish(cfg.get("enabled", True), default=True)
+        transport = "http" if "url" in cfg else "stdio"
+        desc = cfg.get("description", f"MCP server ({transport})")
+        result[name] = {
+            "transport": transport,
+            "description": desc,
+            "enabled": enabled,
+        }
+    return result
+
+
+def activate_mcp_server(name: str) -> List[str]:
+    """Connect to a single MCP server by name and register its tools.
+
+    Called by the ``mcp_servers`` tool handler when the model wants to use
+    tools from a specific server.  Returns the list of newly registered
+    tool names.
+
+    Raises:
+        ValueError: if the server is not in the config or already connected.
+    """
+    global _mcp_tools_dirty
+
+    if not _MCP_AVAILABLE:
+        raise ImportError("MCP SDK is not installed")
+
+    servers = _load_mcp_config()
+    if name not in servers:
+        available = ", ".join(sorted(servers.keys())) or "(none)"
+        raise ValueError(f"Unknown MCP server '{name}'. Available: {available}")
+
+    with _lock:
+        if name in _servers:
+            # Already connected — return existing tools
+            server = _servers[name]
+            return list(getattr(server, "_registered_tool_names", []))
+
+    cfg = servers[name]
+    if not _parse_boolish(cfg.get("enabled", True), default=True):
+        raise ValueError(f"MCP server '{name}' is disabled in config")
+
+    _ensure_mcp_loop()
+
+    async def _do_activate():
+        return await _discover_and_register_server(name, cfg)
+
+    connect_timeout = cfg.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)
+    registered = _run_on_mcp_loop(_do_activate(), timeout=connect_timeout + 30)
+
+    _sync_mcp_toolsets([name])
+    _mcp_tools_dirty = True
+
+    logger.info("Lazy-loaded MCP server '%s': %d tool(s)", name, len(registered))
+    return registered
+
+
+def check_and_clear_mcp_dirty() -> bool:
+    """Return True if new MCP tools were registered since last check, then reset.
+
+    Called by the agent loop after tool execution to decide whether to
+    refresh the tool surface.
+    """
+    global _mcp_tools_dirty
+    if _mcp_tools_dirty:
+        _mcp_tools_dirty = False
+        return True
+    return False
+
+
+def register_mcp_loader_tool() -> None:
+    """Register the lightweight ``mcp_servers`` tool for lazy MCP loading.
+
+    This is called at startup INSTEAD of ``discover_mcp_tools()``.  It adds
+    a single tool (~100 tokens) rather than all MCP tool schemas (~6,000+
+    tokens).  The model calls ``mcp_servers(action="load", server="blender")``
+    to activate a specific server, which then registers all of that server's
+    tools for subsequent turns.
+    """
+    from tools.registry import registry
+    from toolsets import create_custom_toolset
+
+    configured = get_configured_servers()
+    if not configured:
+        return  # No MCP servers configured — nothing to register
+
+    # Build the enum of available server names for the schema
+    server_names = sorted(configured.keys())
+
+    schema = {
+        "name": "mcp_servers",
+        "description": (
+            "Manage MCP (Model Context Protocol) servers. "
+            "Use action='list' to see available servers, or "
+            "action='load' with a server name to activate it and "
+            "make its tools available. Once loaded, the server's tools "
+            "will appear as new tools you can call."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "load"],
+                    "description": "list: show available servers. load: activate a server."
+                },
+                "server": {
+                    "type": "string",
+                    "description": f"Server name to load. Available: {', '.join(server_names)}",
+                },
+            },
+            "required": ["action"],
+        },
+    }
+
+    def handler(args: dict, **kwargs) -> str:
+        action = args.get("action", "list")
+
+        if action == "list":
+            servers = get_configured_servers()
+            with _lock:
+                connected = set(_servers.keys())
+            lines = []
+            for sname, info in sorted(servers.items()):
+                status = "connected" if sname in connected else "available"
+                if not info["enabled"]:
+                    status = "disabled"
+                lines.append(f"  {sname}: {info['description']} [{status}]")
+            return json.dumps({
+                "servers": "\n".join(lines),
+                "hint": "Use action='load' with server=<name> to activate a server's tools.",
+            })
+
+        if action == "load":
+            server_name = args.get("server")
+            if not server_name:
+                return json.dumps({"error": "server parameter required for action='load'"})
+            try:
+                tools = activate_mcp_server(server_name)
+                return json.dumps({
+                    "status": "ok",
+                    "server": server_name,
+                    "tools_registered": len(tools),
+                    "tools": tools,
+                    "note": "These tools are now available for you to call.",
+                })
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        return json.dumps({"error": f"Unknown action: {action}"})
+
+    registry.register(
+        name="mcp_servers",
+        toolset="mcp",
+        schema=schema,
+        handler=handler,
+        check_fn=lambda: bool(get_configured_servers()),
+        is_async=False,
+        description=schema["description"],
+        description_compact=f"Load MCP servers on demand ({', '.join(server_names)})",
+        emoji="🔌",
+    )
+
+    # Create toolset so it's discoverable
+    create_custom_toolset(
+        name="mcp",
+        description="MCP server management (lazy loading)",
+        tools=["mcp_servers"],
+    )

@@ -314,6 +314,7 @@ def _skill_should_show(
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
+    compact: bool = False,
 ) -> str:
     """Build a compact skill index for the system prompt.
 
@@ -404,6 +405,14 @@ def build_skills_system_prompt(
                 index_lines.append(f"    - {name}: {desc}")
             else:
                 index_lines.append(f"    - {name}")
+
+    if compact:
+        # Compact mode: just the skill index, no behavioral guidance
+        return (
+            "<available_skills>\n"
+            + "\n".join(index_lines) + "\n"
+            "</available_skills>"
+        )
 
     return (
         "## Skills (mandatory)\n"

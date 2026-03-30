@@ -208,18 +208,18 @@ class ContextCompressor:
             role = msg.get("role", "unknown")
             content = msg.get("content") or ""
 
-            # Tool results: keep more content than before (3000 chars)
+            # Tool results: cap to 800 chars (aligned with fold limits)
             if role == "tool":
                 tool_id = msg.get("tool_call_id", "")
-                if len(content) > 3000:
-                    content = content[:2000] + "\n...[truncated]...\n" + content[-800:]
+                if len(content) > 800:
+                    content = content[:500] + "\n...[truncated]...\n" + content[-200:]
                 parts.append(f"[TOOL RESULT {tool_id}]: {content}")
                 continue
 
-            # Assistant messages: include tool call names AND arguments
+            # Assistant messages: cap to 800 chars
             if role == "assistant":
-                if len(content) > 3000:
-                    content = content[:2000] + "\n...[truncated]...\n" + content[-800:]
+                if len(content) > 800:
+                    content = content[:500] + "\n...[truncated]...\n" + content[-200:]
                 tool_calls = msg.get("tool_calls", [])
                 if tool_calls:
                     tc_parts = []
@@ -263,10 +263,14 @@ class ContextCompressor:
 
         if self._previous_summary:
             # Iterative update: preserve existing info, add new progress
+            # Cap previous summary to prevent monotonic growth of summarizer input
+            prev = self._previous_summary
+            if len(prev) > 2000:
+                prev = prev[:2000] + "\n...[previous summary truncated]..."
             prompt = f"""You are updating a context compaction summary. A previous compaction produced the summary below. New conversation turns have occurred since then and need to be incorporated.
 
 PREVIOUS SUMMARY:
-{self._previous_summary}
+{prev}
 
 NEW TURNS TO INCORPORATE:
 {content_to_summarize}
@@ -346,7 +350,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 "task": "compression",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "max_tokens": summary_budget * 2,
+                "max_tokens": min(summary_budget * 2, 6000),
                 "timeout": 45.0,
             }
             if self.summary_model:
