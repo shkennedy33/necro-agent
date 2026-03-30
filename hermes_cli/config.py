@@ -139,7 +139,26 @@ DEFAULT_CONFIG = {
     "agent": {
         "max_turns": 90,
     },
-    
+
+    # Hard limits to prevent cost spirals
+    "wards": {
+        "max_turns": 90,                   # Conversation medium turn limit
+        "max_tokens": 800000,              # Total token budget (conversation)
+        "code_medium_max_tokens": 400000,  # Total token budget (code medium)
+        "budget_warning_at": 0.8,          # Warn at 80% of turn budget
+    },
+
+    # Code medium — entity thinks in Python code instead of tool_calls.
+    # When type is "code", the agent gets one "execute" tool and writes programs.
+    # Gates (tools) become host functions callable from the sandbox.
+    "medium": {
+        "type": "conversation",       # "conversation" (default) or "code"
+        "viewport_limit": 500,        # Max chars of console output per turn
+        "timeout": 300,               # Sandbox execution timeout (seconds)
+        "persist_state": True,        # Keep variables across turns
+        "max_turns": 30,              # Code medium turn limit (lower than conversation)
+    },
+
     "terminal": {
         "backend": "local",
         "cwd": ".",  # Use current directory

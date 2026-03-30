@@ -2795,6 +2795,9 @@ class AIAgent:
         Called by run_conversation() when compact mode is active.
         Handles bridge construction, cast invocation, result conversion,
         and post-cast hooks (review, persistence, honcho, title gen).
+
+        When medium.type is "code", creates a CodeMedium with gate injection
+        and passes it to run_cast for code-medium execution (Phase 7).
         """
         from nchat.loop import run_cast, CastResult
         from nchat.wards import load_circle_from_config
@@ -2817,17 +2820,41 @@ class AIAgent:
             api_mode=self.api_mode,
         )
 
+        # ── Code medium detection (Phase 7) ───────────────────────────
+        medium = None
+        medium_config = self._get_medium_config()
+        if medium_config.get("type") == "code":
+            medium = self._create_code_medium(
+                medium_config, circle, crystal, effective_task_id,
+            )
+            # Rebuild system prompt with medium documentation
+            active_system_prompt = self._build_system_prompt_compact(
+                system_message=system_message,
+                medium_capability_text=medium.capability_text(
+                    include_composition=circle.max_depth > 0,
+                ),
+            )
+
         # Run the cast
-        result = run_cast(
-            crystal=crystal,
-            call=active_system_prompt,
-            circle=circle,
-            intent=user_message,
-            history=messages,
-            entity_id=self.session_id,
-            loom=self._loom,
-            bridge=bridge,
-        )
+        try:
+            result = run_cast(
+                crystal=crystal,
+                call=active_system_prompt,
+                circle=circle,
+                intent=user_message,
+                history=messages,
+                entity_id=self.session_id,
+                loom=self._loom,
+                bridge=bridge,
+                medium=medium,
+            )
+        finally:
+            # Clean up code medium sandbox
+            if medium:
+                try:
+                    medium.close()
+                except Exception:
+                    pass
 
         # Update internal message list
         messages = result.messages
@@ -2836,7 +2863,9 @@ class AIAgent:
         # Determine completion status
         interrupted = result.status == "interrupted"
         completed = result.status == "terminated"
-        final_response = result.response if result.response else None
+        # Preserve empty string vs None distinction.
+        # None = no response generated; empty = model responded with empty text.
+        final_response = result.response
 
         # Strip think blocks from final response
         if final_response:
@@ -2863,6 +2892,10 @@ class AIAgent:
                 last_reasoning = msg["reasoning"]
                 break
 
+        # Compute history_offset for gateway transcript saving.
+        # The gateway uses this to identify which messages are new.
+        _history_offset = len(conversation_history) if conversation_history else 0
+
         # Build result dict (same format as run_conversation)
         result_dict = {
             "final_response": final_response,
@@ -2870,7 +2903,10 @@ class AIAgent:
             "messages": messages,
             "api_calls": result.turns,
             "completed": completed,
+            "failed": result.status == "failed",
+            "error": result.error,
             "partial": False,
+            "history_offset": _history_offset,
             "interrupted": interrupted,
             "response_previewed": False,
             "model": self.model,
@@ -2915,12 +2951,20 @@ class AIAgent:
 
         return result_dict
 
-    def _build_system_prompt_compact(self, system_message: str = None) -> str:
+    def _build_system_prompt_compact(
+        self,
+        system_message: str = None,
+        medium_capability_text: str = None,
+    ) -> str:
         """Build system prompt using the compact nchat.call path.
 
         The soul is the soul. The circle presents its own capabilities.
         No MEMORY_GUIDANCE, no SESSION_SEARCH_GUIDANCE, no SKILLS_GUIDANCE,
         no verbose platform hints.
+
+        When medium_capability_text is provided (code medium), it replaces
+        the standard tool listing with medium documentation (~600 tokens
+        instead of ~3,300 tokens).
         """
         from nchat.call import build_system_prompt_compact
         from tools.registry import registry
@@ -2988,7 +3032,89 @@ class AIAgent:
             system_message=system_message,
             honcho_block=honcho_block,
             context_files_prompt=context_files_prompt,
+            medium_capability_text=medium_capability_text,
         )
+
+    def _get_medium_config(self) -> dict:
+        """Load medium configuration from cli-config.yaml.
+
+        Returns dict with at minimum {"type": "conversation"|"code"}.
+        """
+        try:
+            from hermes_cli.config import load_config
+            config = load_config()
+            medium_cfg = config.get("medium", {})
+            if isinstance(medium_cfg, str):
+                return {"type": medium_cfg}
+            return medium_cfg if isinstance(medium_cfg, dict) else {}
+        except Exception:
+            return {}
+
+    def _create_code_medium(
+        self,
+        medium_config: dict,
+        circle,
+        crystal,
+        task_id: str,
+    ):
+        """Create and configure a CodeMedium for Phase 7 code execution.
+
+        Registers all available gates from the tool registry, plus
+        composition gates (cantrip/cast) if depth allows.
+        """
+        from nchat.medium import CodeMedium, GateSpec, GATE_SIGNATURES
+        from nchat.compose import ComposeEngine
+        from nchat.loop import run_cast
+
+        code_cfg = medium_config.get("code", {})
+        medium = CodeMedium(
+            language=code_cfg.get("language", "python"),
+            viewport_limit=code_cfg.get("viewport_limit", 500),
+            persist_state=code_cfg.get("persist_state", True),
+            timeout=code_cfg.get("timeout", 300),
+            progress_callback=getattr(self, "tool_progress_callback", None),
+        )
+
+        # Register all available gates from the tool registry
+        medium.register_gates_from_registry(self.valid_tool_names, task_id=task_id)
+
+        # Register composition gates if depth allows (Phase 7b)
+        if circle.max_depth > 0:
+            compose = ComposeEngine(
+                run_child_fn=run_cast,
+                loom=self._loom,
+                parent_entity_id=self.session_id,
+                parent_circle=circle,
+                parent_remaining_turns=circle.max_turns.limit,
+                max_depth=circle.max_depth,
+                max_concurrent=code_cfg.get("max_concurrent_children", 8),
+                parent_agent=self,
+                progress_callback=getattr(self, "tool_progress_callback", None),
+            )
+            medium.register_gate(GateSpec(
+                name="cantrip", handler=compose.cantrip_gate,
+                signature=GATE_SIGNATURES.get("cantrip", ""),
+            ))
+            medium.register_gate(GateSpec(
+                name="cast", handler=compose.cast_gate,
+                signature=GATE_SIGNATURES.get("cast", ""),
+            ))
+            medium.register_gate(GateSpec(
+                name="cast_batch", handler=compose.cast_batch_gate,
+                signature=GATE_SIGNATURES.get("cast_batch", ""),
+            ))
+            medium.register_gate(GateSpec(
+                name="dispose", handler=compose.dispose_gate,
+                signature=GATE_SIGNATURES.get("dispose", ""),
+            ))
+
+        if not self.quiet_mode:
+            gate_count = len(medium._gates)
+            print(f"🔮 Code medium active: {gate_count} gates, "
+                  f"viewport={medium.viewport_limit}, "
+                  f"depth={circle.max_depth}")
+
+        return medium
 
     def _build_system_prompt(self, system_message: str = None) -> str:
         """
@@ -6194,52 +6320,74 @@ class AIAgent:
             if _is_nous:
                 summary_extra_body["tags"] = ["product=hermes-agent"]
 
-            if self.api_mode == "codex_responses":
-                codex_kwargs = self._build_api_kwargs(api_messages)
-                codex_kwargs.pop("tools", None)
-                summary_response = self._run_codex_stream(codex_kwargs)
-                assistant_message, _ = self._normalize_codex_response(summary_response)
-                final_response = (assistant_message.content or "").strip() if assistant_message else ""
-            else:
-                summary_kwargs = {
-                    "model": self.model,
-                    "messages": api_messages,
-                }
-                if self.max_tokens is not None:
-                    summary_kwargs.update(self._max_tokens_param(self.max_tokens))
-
-                # Include provider routing preferences
-                provider_preferences = {}
-                if self.providers_allowed:
-                    provider_preferences["only"] = self.providers_allowed
-                if self.providers_ignored:
-                    provider_preferences["ignore"] = self.providers_ignored
-                if self.providers_order:
-                    provider_preferences["order"] = self.providers_order
-                if self.provider_sort:
-                    provider_preferences["sort"] = self.provider_sort
-                if provider_preferences:
-                    summary_extra_body["provider"] = provider_preferences
-
-                if summary_extra_body:
-                    summary_kwargs["extra_body"] = summary_extra_body
-
-                if self.api_mode == "anthropic_messages":
-                    from agent.anthropic_adapter import build_anthropic_kwargs as _bak, normalize_anthropic_response as _nar
-                    _ant_kw = _bak(model=self.model, messages=api_messages, tools=None,
-                                   max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
-                                   is_oauth=self._is_anthropic_oauth,
-                                   preserve_dots=self._anthropic_preserve_dots())
-                    summary_response = self._anthropic_messages_create(_ant_kw)
-                    _msg, _ = _nar(summary_response, strip_tool_prefix=self._is_anthropic_oauth)
-                    final_response = (_msg.content or "").strip()
+            # Try auxiliary model first — summary generation doesn't need
+            # the primary model's reasoning capability and saves significant
+            # tokens (the full conversation context is in api_messages).
+            _aux_summary_done = False
+            try:
+                from agent.auxiliary_client import call_llm as _call_llm_summary
+                summary_response = _call_llm_summary(
+                    task="compression",
+                    messages=api_messages,
+                    temperature=0.3,
+                    max_tokens=4096,
+                    timeout=30.0,
+                )
+                if summary_response.choices and summary_response.choices[0].message.content:
+                    final_response = summary_response.choices[0].message.content
+                    _aux_summary_done = True
                 else:
-                    summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary").chat.completions.create(**summary_kwargs)
+                    final_response = ""
+            except Exception:
+                _aux_summary_done = False
 
-                    if summary_response.choices and summary_response.choices[0].message.content:
-                        final_response = summary_response.choices[0].message.content
+            if not _aux_summary_done:
+                if self.api_mode == "codex_responses":
+                    codex_kwargs = self._build_api_kwargs(api_messages)
+                    codex_kwargs.pop("tools", None)
+                    summary_response = self._run_codex_stream(codex_kwargs)
+                    assistant_message, _ = self._normalize_codex_response(summary_response)
+                    final_response = (assistant_message.content or "").strip() if assistant_message else ""
+                else:
+                    summary_kwargs = {
+                        "model": self.model,
+                        "messages": api_messages,
+                    }
+                    if self.max_tokens is not None:
+                        summary_kwargs.update(self._max_tokens_param(self.max_tokens))
+
+                    # Include provider routing preferences
+                    provider_preferences = {}
+                    if self.providers_allowed:
+                        provider_preferences["only"] = self.providers_allowed
+                    if self.providers_ignored:
+                        provider_preferences["ignore"] = self.providers_ignored
+                    if self.providers_order:
+                        provider_preferences["order"] = self.providers_order
+                    if self.provider_sort:
+                        provider_preferences["sort"] = self.provider_sort
+                    if provider_preferences:
+                        summary_extra_body["provider"] = provider_preferences
+
+                    if summary_extra_body:
+                        summary_kwargs["extra_body"] = summary_extra_body
+
+                    if self.api_mode == "anthropic_messages":
+                        from agent.anthropic_adapter import build_anthropic_kwargs as _bak, normalize_anthropic_response as _nar
+                        _ant_kw = _bak(model=self.model, messages=api_messages, tools=None,
+                                       max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
+                                       is_oauth=self._is_anthropic_oauth,
+                                       preserve_dots=self._anthropic_preserve_dots())
+                        summary_response = self._anthropic_messages_create(_ant_kw)
+                        _msg, _ = _nar(summary_response, strip_tool_prefix=self._is_anthropic_oauth)
+                        final_response = (_msg.content or "").strip()
                     else:
-                        final_response = ""
+                        summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary").chat.completions.create(**summary_kwargs)
+
+                        if summary_response.choices and summary_response.choices[0].message.content:
+                            final_response = summary_response.choices[0].message.content
+                        else:
+                            final_response = ""
 
             if final_response:
                 if "<think>" in final_response:
@@ -6249,38 +6397,54 @@ class AIAgent:
                 else:
                     final_response = "I reached the iteration limit and couldn't generate a summary."
             else:
-                # Retry summary generation
-                if self.api_mode == "codex_responses":
-                    codex_kwargs = self._build_api_kwargs(api_messages)
-                    codex_kwargs.pop("tools", None)
-                    retry_response = self._run_codex_stream(codex_kwargs)
-                    retry_msg, _ = self._normalize_codex_response(retry_response)
-                    final_response = (retry_msg.content or "").strip() if retry_msg else ""
-                elif self.api_mode == "anthropic_messages":
-                    from agent.anthropic_adapter import build_anthropic_kwargs as _bak2, normalize_anthropic_response as _nar2
-                    _ant_kw2 = _bak2(model=self.model, messages=api_messages, tools=None,
-                                    is_oauth=self._is_anthropic_oauth,
-                                    max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
-                                    preserve_dots=self._anthropic_preserve_dots())
-                    retry_response = self._anthropic_messages_create(_ant_kw2)
-                    _retry_msg, _ = _nar2(retry_response, strip_tool_prefix=self._is_anthropic_oauth)
-                    final_response = (_retry_msg.content or "").strip()
-                else:
-                    summary_kwargs = {
-                        "model": self.model,
-                        "messages": api_messages,
-                    }
-                    if self.max_tokens is not None:
-                        summary_kwargs.update(self._max_tokens_param(self.max_tokens))
-                    if summary_extra_body:
-                        summary_kwargs["extra_body"] = summary_extra_body
+                # Retry summary generation — try auxiliary first, same as initial attempt
+                _aux_retry_done = False
+                try:
+                    retry_response = _call_llm_summary(
+                        task="compression",
+                        messages=api_messages,
+                        temperature=0.3,
+                        max_tokens=4096,
+                        timeout=30.0,
+                    )
+                    if retry_response.choices and retry_response.choices[0].message.content:
+                        final_response = retry_response.choices[0].message.content
+                        _aux_retry_done = True
+                except Exception:
+                    pass
 
-                    summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary_retry").chat.completions.create(**summary_kwargs)
-
-                    if summary_response.choices and summary_response.choices[0].message.content:
-                        final_response = summary_response.choices[0].message.content
+                if not _aux_retry_done:
+                    if self.api_mode == "codex_responses":
+                        codex_kwargs = self._build_api_kwargs(api_messages)
+                        codex_kwargs.pop("tools", None)
+                        retry_response = self._run_codex_stream(codex_kwargs)
+                        retry_msg, _ = self._normalize_codex_response(retry_response)
+                        final_response = (retry_msg.content or "").strip() if retry_msg else ""
+                    elif self.api_mode == "anthropic_messages":
+                        from agent.anthropic_adapter import build_anthropic_kwargs as _bak2, normalize_anthropic_response as _nar2
+                        _ant_kw2 = _bak2(model=self.model, messages=api_messages, tools=None,
+                                        is_oauth=self._is_anthropic_oauth,
+                                        max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
+                                        preserve_dots=self._anthropic_preserve_dots())
+                        retry_response = self._anthropic_messages_create(_ant_kw2)
+                        _retry_msg, _ = _nar2(retry_response, strip_tool_prefix=self._is_anthropic_oauth)
+                        final_response = (_retry_msg.content or "").strip()
                     else:
-                        final_response = ""
+                        summary_kwargs = {
+                            "model": self.model,
+                            "messages": api_messages,
+                        }
+                        if self.max_tokens is not None:
+                            summary_kwargs.update(self._max_tokens_param(self.max_tokens))
+                        if summary_extra_body:
+                            summary_kwargs["extra_body"] = summary_extra_body
+
+                        summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary_retry").chat.completions.create(**summary_kwargs)
+
+                        if summary_response.choices and summary_response.choices[0].message.content:
+                            final_response = summary_response.choices[0].message.content
+                        else:
+                            final_response = ""
 
                 if final_response:
                     if "<think>" in final_response:
